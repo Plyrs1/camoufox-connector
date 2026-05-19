@@ -159,7 +159,7 @@ class Settings(BaseSettings):
         """Get WebSocket port for a given browser instance index."""
         return self.ws_port_start + index
 
-    def to_camoufox_kwargs(self) -> dict:
+    def to_camoufox_kwargs(self, port: int = None) -> dict:
         """Convert settings to kwargs for camoufox launch_server."""
         kwargs = {
             "headless": self.headless,
@@ -170,5 +170,8 @@ class Settings(BaseSettings):
 
         if self.proxy:
             kwargs["proxy"] = self.proxy
+
+        if port is not None:
+            kwargs["port"] = port
 
         return kwargs

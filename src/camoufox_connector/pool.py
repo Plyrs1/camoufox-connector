@@ -147,7 +147,7 @@ class BrowserPool:
 
     def _generate_launcher_script(self, port: int) -> str:
         """Generate Python script to launch Camoufox server."""
-        kwargs = self.settings.to_camoufox_kwargs()
+        kwargs = self.settings.to_camoufox_kwargs(port=port)
 
         # Build kwargs string, only including non-None values
         kwargs_items = []
