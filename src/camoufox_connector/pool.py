@@ -7,8 +7,14 @@ Manages multiple Camoufox browser instances with round-robin load balancing.
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 import logging
+import os
 import re
+import signal
+import socket
+import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
@@ -60,6 +66,12 @@ class BrowserPool:
 
     Provides round-robin load balancing across browser instances,
     each with its own unique fingerprint.
+
+    # TODO(Windows): Process group signaling and port tracking are Linux/Unix-only.
+    # For Windows support, evaluate:
+    #   - subprocess.CREATE_NEW_PROCESS_GROUP for process groups
+    #   - os.kill(pid, signal.CTRL_BREAK_EVENT) for signaling
+    #   - netstat -ano or GetExtendedTcpTable for port-to-PID mapping
     """
 
     settings: Settings
@@ -104,27 +116,24 @@ class BrowserPool:
         try:
             logger.info(f"Starting browser instance {instance.index} on port {instance.port}")
 
-            # Create the launcher script content
-            launcher_code = self._generate_launcher_script(instance.port)
+            kwargs = self.settings.to_camoufox_kwargs(port=instance.port)
 
-            # Start the process
-            if sys.platform == "win32":
-                instance.process = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "-c",
-                    launcher_code,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                    creationflags=0x08000000,  # CREATE_NO_WINDOW on Windows
-                )
-            else:
-                instance.process = await asyncio.create_subprocess_exec(
-                    sys.executable,
-                    "-c",
-                    launcher_code,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
+            # Reclaim port if a stale orphan process is still holding it.
+            if not self._is_port_free(instance.port):
+                logger.warning(f"Port {instance.port} occupied — reclaiming stale process")
+                for pid in self._find_pids_binding_port(instance.port):
+                    await self._kill_process_tree(pid)
+                await asyncio.sleep(0.2)  # Allow OS to release the port
+
+            # Start the launcher as a dedicated module (replaces generated script).
+            instance.process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "camoufox_connector.launcher",
+                json.dumps(kwargs),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
             instance.started_at = time.time()
 
@@ -145,71 +154,60 @@ class BrowserPool:
             instance.is_healthy = False
             raise
 
-    def _generate_launcher_script(self, port: int) -> str:
-        """Generate Python script to launch Camoufox server."""
-        kwargs = self.settings.to_camoufox_kwargs(port=port)
+    # ------------------------------------------------------------------
+    # Port tracking (pure-Python, no external tools like lsof)
+    # ------------------------------------------------------------------
 
-        # Build kwargs string, only including non-None values
-        kwargs_items = []
-        for key, value in kwargs.items():
-            if value is not None:
-                if isinstance(value, bool):
-                    kwargs_items.append(f"    {key}={value},")
-                elif isinstance(value, str):
-                    kwargs_items.append(f"    {key}='{value}',")
-                else:
-                    kwargs_items.append(f"    {key}={value!r},")
+    @staticmethod
+    def _is_port_free(port: int, host: str = "127.0.0.1") -> bool:
+        """Check whether a TCP port is currently available."""
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1.0)
+            return sock.connect_ex((host, port)) != 0
 
-        kwargs_str = "\n".join(kwargs_items)
+    @staticmethod
+    def _find_pids_binding_port(port: int) -> list[int]:
+        """List PIDs that have a socket listening on *port*.
 
-        # Custom launch script that filters None values from config
-        # This works around a bug in camoufox 0.4.11 where proxy=None
-        # gets serialized as null and breaks the Node.js server
-        script = f"""
-import sys
-if sys.platform == 'win32':
-    import codecs
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer)
-    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer)
+        This is a pure-Python implementation that scans ``/proc/*/fd/`` to find
+        inodes open as sockets and matches them against entries in
+        ``/proc/net/tcp`` (and ``/proc/net/tcp6``).
 
-import subprocess
-import base64
-import orjson
-from pathlib import Path
-from playwright._impl._driver import compute_driver_executable
-from camoufox.pkgman import LOCAL_DATA
-from camoufox.utils import launch_options
-from camoufox.server import to_camel_case_dict
+        Works on Linux only.  Falls back to an empty list on any error.
+        """
+        try:
+            inodes = _get_listening_inodes_for_port(port)
+            if not inodes:
+                return []
+            return _find_pids_for_inodes(inodes)
+        except Exception:
+            return []
 
-# Get config from launch_options
-config = launch_options(
-{kwargs_str}
-)
+    @staticmethod
+    async def _kill_process_tree(pid: int, timeout: float = 5.0) -> None:
+        """Send SIGTERM, wait briefly, then SIGKILL if the process still lives."""
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return  # Already gone
+        except PermissionError:
+            logger.warning(f"Permission denied killing PID {pid}")
+            return
 
-# Filter out None values (workaround for camoufox bug)
-config = {{k: v for k, v in config.items() if v is not None}}
+        # Short grace period before SIGKILL
+        await asyncio.sleep(min(timeout, 0.5))
 
-# Launch the server (same as camoufox.server.launch_server but with filtered config)
-LAUNCH_SCRIPT = LOCAL_DATA / "launchServer.js"
-_nodejs = compute_driver_executable()[0]
-nodejs = _nodejs[0] if isinstance(_nodejs, tuple) else _nodejs
+        try:
+            os.kill(pid, 0)  # Check if still alive (raises if dead)
+        except ProcessLookupError:
+            return
 
-data = orjson.dumps(to_camel_case_dict(config))
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
-process = subprocess.Popen(
-    [nodejs, str(LAUNCH_SCRIPT)],
-    cwd=Path(nodejs).parent / "package",
-    stdin=subprocess.PIPE,
-    text=True,
-)
-if process.stdin:
-    process.stdin.write(base64.b64encode(data).decode())
-    process.stdin.close()
-
-process.wait()
-raise RuntimeError("Server process terminated unexpectedly")
-"""
-        return script.strip()
+    # ------------------------------------------------------------------
 
     async def _wait_for_endpoint(
         self,
@@ -335,23 +333,38 @@ raise RuntimeError("Server process terminated unexpectedly")
         logger.info("Browser pool stopped")
 
     async def _stop_instance(self, instance: BrowserInstance) -> None:
-        """Stop a single browser instance."""
+        """Stop a single browser instance with orphan cleanup."""
         if instance.process is None:
             return
 
+        port = instance.port
+        process = instance.process
+
         try:
-            instance.process.terminate()
+            # Step 1: graceful termination — launcher forwards SIGTERM to the group
+            process.terminate()
             try:
-                await asyncio.wait_for(instance.process.wait(), timeout=5.0)
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except asyncio.TimeoutError:
+                # Step 2: force kill launcher directly
                 logger.warning(f"Force killing browser instance {instance.index}")
-                instance.process.kill()
-                await instance.process.wait()
+                process.kill()
+                try:
+                    await asyncio.wait_for(process.wait(), timeout=5.0)
+                except asyncio.TimeoutError:
+                    logger.warning(f"Cannot kill browser instance {instance.index}")
+
+            # Step 3: port-based orphan cleanup if the port is still occupied
+            if not self._is_port_free(port):
+                logger.warning(f"Port {port} still occupied after stop — hunting orphans")
+                for pid in self._find_pids_binding_port(port):
+                    await self._kill_process_tree(pid)
+
         except Exception as e:
             logger.error(f"Error stopping browser instance {instance.index}: {e}")
-
-        instance.is_healthy = False
-        instance.ws_endpoint = None
+        finally:
+            instance.is_healthy = False
+            instance.ws_endpoint = None
 
     async def get_next_endpoint(self) -> Optional[str]:
         """
@@ -451,3 +464,70 @@ raise RuntimeError("Server process terminated unexpectedly")
 
         results["healthy"] = any(inst.is_healthy for inst in self.instances)
         return results
+
+
+# ------------------------------------------------------------------------------
+# Pure-Python port-to-PID helpers (Linux-only)
+# ------------------------------------------------------------------------------
+
+
+def _get_listening_inodes_for_port(port: int) -> set[int]:
+    """Parse /proc/net/tcp{,6} and return inodes for sockets listening on *port*."""
+    inodes: set[int] = set()
+    hex_port = f"{port:04X}"
+
+    for net_file in ("/proc/net/tcp", "/proc/net/tcp6"):
+        try:
+            with open(net_file) as fh:
+                next(fh)  # skip header line
+                for line in fh:
+                    parts = line.strip().split()
+                    if len(parts) < 10:
+                        continue
+                    # parts[1] = "local_address:port"
+                    local = parts[1]
+                    if not local.endswith(f":{hex_port}"):
+                        continue
+                    state = parts[3]
+                    # 0x0A = TCP_LISTEN
+                    if state == "0A":
+                        inode_str = parts[9]
+                        if inode_str != "0":
+                            inodes.add(int(inode_str))
+        except FileNotFoundError:
+            continue
+
+    return inodes
+
+
+def _find_pids_for_inodes(inodes: set[int]) -> list[int]:
+    """Scan /proc/*/fd/* to find PIDs that own any of the given socket inodes."""
+    pids: set[int] = set()
+    proc_dir = "/proc"
+
+    try:
+        entries = os.listdir(proc_dir)
+    except OSError:
+        return []
+
+    for entry in entries:
+        if not entry.isdigit():
+            continue
+        pid = int(entry)
+        fd_dir = os.path.join(proc_dir, entry, "fd")
+        try:
+            for fd in os.listdir(fd_dir):
+                try:
+                    link = os.readlink(os.path.join(fd_dir, fd))
+                    # Socket links look like: "socket:[12345]"
+                    if link.startswith("socket:[") and link.endswith("]"):
+                        inode = int(link[8:-1])
+                        if inode in inodes:
+                            pids.add(pid)
+                            break  # No need to check other fds for this PID
+                except (OSError, ValueError):
+                    continue
+        except OSError:
+            continue
+
+    return list(pids)
