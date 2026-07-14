@@ -1,7 +1,7 @@
 # Camoufox Connector - Multi-stage Docker build
 # Base image with Python and system dependencies
 
-FROM python:3.11-slim as base
+FROM python:3.11-slim-trixie AS base
 
 # Install system dependencies for browsers
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,22 +28,39 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrandr2 \
     xdg-utils \
     xvfb \
+    x11vnc novnc \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=ghcr.io/astral-sh/uv:0.11.25 /uv /uvx /bin/
+
+RUN uv venv /opt/venv
+# Use the virtual environment automatically
+ENV VIRTUAL_ENV=/opt/venv
+# Place entry points in the environment at the front of the path
+ENV PATH="/opt/venv/bin:$PATH"
+# Set up VNC environment
+ENV DISPLAY=:99
+ENV VNC_PORT=5900
+ENV NOVNC_PORT=6080
 
 # Set working directory
 WORKDIR /app
 
 # Install Python dependencies
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --no-cache-dir -r requirements.txt
 
 # Pre-download camoufox browser binaries to avoid runtime downloads
 # This prevents multiple pool instances from downloading simultaneously
-RUN camoufox fetch
+RUN --mount=type=cache,target=/root/.cache/uv \
+    camoufox fetch
 
 # Install the application
 COPY . .
-RUN pip install --no-cache-dir -e .
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --no-cache-dir -e .
+RUN chmod +x start.sh
 
 # Expose ports
 # 8080: HTTP API
@@ -67,4 +84,4 @@ ENV CAMOUFOX_MODE=single \
     CAMOUFOX_BLOCK_IMAGES=false
 
 # Run with xvfb for headless support
-ENTRYPOINT ["python", "-m", "camoufox_connector.server"]
+ENTRYPOINT ["/app/start.sh"]

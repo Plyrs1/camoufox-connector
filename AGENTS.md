@@ -9,9 +9,9 @@
 Camoufox is a Firefox-based anti-detect browser with a **Python-only** API. This project makes it accessible from **any language** via Playwright's remote protocol:
 
 - Spawns one or more Camoufox browser instances
-- Each instance gets a unique fingerprint and a WebSocket endpoint (`ws://host:port/...`)
-- Exposes an HTTP API for load balancing, health checks, and management
-- Clients connect via Playwright's `firefox.connect(endpoint)` method
+- Each instance gets a unique fingerprint and an internal WebSocket endpoint (`ws://host:port/...`)
+- Exposes an HTTP API for load balancing, health checks, management, and WebSocket proxying
+- Clients connect via Playwright's `firefox.connect(endpoint)` method using connector-hosted proxy URLs
 
 ### Use Cases
 - High-volume web scraping with fingerprint rotation (pool mode)
@@ -30,7 +30,8 @@ Client (Node.js/Go/Python/Java/etc.)
   │  HTTP API (Starlette/Uvicorn)       │
   │  Port: API_PORT (default 8080)      │
   │  Endpoints: /, /health, /next,      │
-  │  /endpoints, /stats, /restart/{n}   │
+  │  /ws/{token}, /endpoints, /stats,   │
+  │  /restart/{n}                       │
   └────────────────┬────────────────────┘
                    │ creates & starts
                    ▼
@@ -80,11 +81,13 @@ Client (Node.js/Go/Python/Java/etc.)
 │   ├── csharp/, kotlin/           # Full Playwright examples
 │   ├── ruby/, php/, rust/         # API-only examples (no native Playwright)
 │   └── curl/                      # Shell/cURL examples
+├── docs/                          # User-facing documentation
+│   └── API.md                     # Usage guide and HTTP API request/response reference
 ├── pyproject.toml                 # Package metadata, deps, entry points, tool config
 ├── requirements.txt               # Runtime dependencies
 ├── Dockerfile                     # Multi-stage build, pre-downloads camoufox
 ├── docker-compose.yml             # Three service profiles: single, pool, proxy
-├── .env.example                   # Example environment variables (see §6)
+├── env.example                    # Example environment variables (see §6)
 ├── README.md                      # User-facing comprehensive docs
 └── .github/workflows/docker.yml   # CI: build & push Docker image on v* tags
 ```
@@ -103,6 +106,7 @@ Client (Node.js/Go/Python/Java/etc.)
 | Configuration | Pydantic (>=2.0.0) + pydantic-settings |
 | JSON Serialization | orjson (used in launcher.py for speed) |
 | HTTP Client | httpx (>=0.26.0) |
+| WebSocket Client | websockets (>=12.0) |
 | Dev Tools | pytest, pytest-asyncio, black, ruff |
 
 ---
@@ -121,7 +125,7 @@ Client (Node.js/Go/Python/Java/etc.)
 
 ### 5.2 `pool.py` — Browser Pool
 
-- **`BrowserInstance`** dataclass: tracks index, port, ws_endpoint, process, connections, health
+- **`BrowserInstance`** dataclass: tracks index, port, internal ws_endpoint, stable proxy endpoint/token, process, connections, health, and status
 - **`BrowserPool`**:
   - `start()`: spawns all instances concurrently
   - `stop()`: graceful shutdown with SIGTERM → SIGKILL cascade
@@ -146,8 +150,9 @@ Client (Node.js/Go/Python/Java/etc.)
 |----------|--------|-------------|
 | `/` | GET | Server info (name, version, mode, config) |
 | `/health` | GET | Health check. 200 if >=1 healthy instance, 503 otherwise |
-| `/next` | GET | Round-robin browser WebSocket endpoint |
-| `/endpoints` | GET | List all healthy endpoints |
+| `/next` | GET | Round-robin proxied browser WebSocket endpoint |
+| `/ws/{token}` | WebSocket | Proxy Playwright traffic to the mapped browser instance |
+| `/endpoints` | GET | List all healthy proxied endpoints with browser status |
 | `/stats` | GET | Pool stats: connections, uptime, per-instance details |
 | `/restart/{n}` | POST | Restart browser instance N |
 
@@ -176,7 +181,8 @@ All config uses `CAMOUFOX_` prefix. See `.env.example` for a template.
 | `CAMOUFOX_POOL_SIZE` | `3` | Browser instances in pool mode (1–20) |
 | `CAMOUFOX_API_PORT` | `8080` | HTTP API port (1024–65535) |
 | `CAMOUFOX_API_HOST` | `0.0.0.0` | HTTP API bind host |
-| `CAMOUFOX_WS_PORT_START` | `9222` | Starting WebSocket port (1024–65500) |
+| `CAMOUFOX_WS_PORT_START` | `9222` | Starting internal browser WebSocket port (1024–65500) |
+| `CAMOUFOX_PUBLIC_WS_URL` | `ws://localhost:8080` | Public WebSocket base URL returned by `/next` and `/endpoints` |
 | `CAMOUFOX_HEADLESS` | `true` | Headless mode |
 | `CAMOUFOX_GEOIP` | `true` | GeoIP spoofing (requires proxy) |
 | `CAMOUFOX_HUMANIZE` | `true` | Humanization features |
@@ -203,6 +209,7 @@ camoufox-connector --config config.json
 {
   "mode": "pool",
   "pool_size": 5,
+  "public_ws_url": "ws://localhost:8080",
   "headless": true,
   "geoip": true,
   "humanize": true,

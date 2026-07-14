@@ -12,6 +12,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -32,12 +33,25 @@ class BrowserInstance:
     index: int
     port: int
     ws_endpoint: Optional[str] = None
+    proxy_token: Optional[str] = None
+    proxy_endpoint: Optional[str] = None
     process: Optional[asyncio.subprocess.Process] = None
     started_at: Optional[float] = None
     connections: int = 0
     total_connections: int = 0
     is_healthy: bool = False
     last_health_check: Optional[float] = None
+
+    @property
+    def status(self) -> str:
+        """Get the browser instance status for API responses."""
+        if self.process is None or self.ws_endpoint is None:
+            return "inactive"
+        if not self.is_healthy:
+            return "error"
+        if self.connections > 0:
+            return "busy"
+        return "idle"
 
     @property
     def uptime(self) -> float:
@@ -52,6 +66,8 @@ class BrowserInstance:
             "index": self.index,
             "port": self.port,
             "ws_endpoint": self.ws_endpoint,
+            "proxy_endpoint": self.proxy_endpoint,
+            "status": self.status,
             "uptime": round(self.uptime, 2),
             "connections": self.connections,
             "total_connections": self.total_connections,
@@ -142,9 +158,11 @@ class BrowserPool:
 
             if ws_endpoint:
                 instance.ws_endpoint = ws_endpoint
+                instance.proxy_token = secrets.token_urlsafe(32)
+                instance.proxy_endpoint = self._build_proxy_endpoint(instance.proxy_token)
                 instance.is_healthy = True
                 logger.info(
-                    f"Browser instance {instance.index} ready at {ws_endpoint}"
+                    f"Browser instance {instance.index} ready at {instance.proxy_endpoint}"
                 )
             else:
                 raise RuntimeError("Failed to get WebSocket endpoint")
@@ -365,39 +383,67 @@ class BrowserPool:
         finally:
             instance.is_healthy = False
             instance.ws_endpoint = None
+            instance.proxy_token = None
+            instance.proxy_endpoint = None
 
-    async def get_next_endpoint(self) -> Optional[str]:
+    def _build_proxy_endpoint(self, token: str) -> str:
+        """Build the public proxy WebSocket endpoint for a token."""
+        return f"{self.settings.get_public_ws_base_url()}/ws/{token}"
+
+    async def get_next_instance(self) -> Optional[BrowserInstance]:
         """
-        Get the next available WebSocket endpoint using round-robin.
+        Get the next available browser instance using round-robin.
 
         Returns:
-            WebSocket endpoint URL or None if no healthy instances available.
+            Browser instance or None if no healthy instances are available.
         """
         async with self._lock:
             if not self.instances:
                 return None
 
-            # Find next healthy instance
             attempts = 0
             while attempts < len(self.instances):
                 instance = self.instances[self._current_index]
                 self._current_index = (self._current_index + 1) % len(self.instances)
 
-                if instance.is_healthy and instance.ws_endpoint:
-                    instance.connections += 1
-                    instance.total_connections += 1
-                    return instance.ws_endpoint
+                if instance.is_healthy and instance.ws_endpoint and instance.proxy_endpoint:
+                    return instance
 
                 attempts += 1
 
             return None
 
-    def get_all_endpoints(self) -> list[str]:
-        """Get all healthy WebSocket endpoints."""
+    async def get_next_endpoint(self) -> Optional[str]:
+        """
+        Get the next available proxied WebSocket endpoint using round-robin.
+
+        Returns:
+            Proxied WebSocket endpoint URL or None if no healthy instances are available.
+        """
+        instance = await self.get_next_instance()
+        return instance.proxy_endpoint if instance else None
+
+    def get_instance_by_proxy_token(self, token: str) -> Optional[BrowserInstance]:
+        """Get a browser instance by its stable proxy token."""
+        for instance in self.instances:
+            if instance.proxy_token == token:
+                return instance
+        return None
+
+    def get_all_endpoints(self) -> list[dict]:
+        """Get all healthy proxied WebSocket endpoints with status metadata."""
         return [
-            inst.ws_endpoint
+            {
+                "index": inst.index,
+                "endpoint": inst.proxy_endpoint,
+                "proxy_endpoint": inst.proxy_endpoint,
+                "status": inst.status,
+                "healthy": inst.is_healthy,
+                "connections": inst.connections,
+                "total_connections": inst.total_connections,
+            }
             for inst in self.instances
-            if inst.is_healthy and inst.ws_endpoint
+            if inst.is_healthy and inst.proxy_endpoint
         ]
 
     def get_stats(self) -> dict:
@@ -425,6 +471,8 @@ class BrowserPool:
 
         # Reset instance state
         instance.ws_endpoint = None
+        instance.proxy_token = None
+        instance.proxy_endpoint = None
         instance.started_at = None
         instance.connections = 0
         instance.is_healthy = False
@@ -459,7 +507,9 @@ class BrowserPool:
             results["instances"].append({
                 "index": instance.index,
                 "healthy": instance.is_healthy,
-                "endpoint": instance.ws_endpoint,
+                "endpoint": instance.proxy_endpoint,
+                "proxy_endpoint": instance.proxy_endpoint,
+                "status": instance.status,
             })
 
         results["healthy"] = any(inst.is_healthy for inst in self.instances)

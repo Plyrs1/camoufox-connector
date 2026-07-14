@@ -6,14 +6,16 @@ Provides endpoints for health monitoring and browser pool management.
 
 from __future__ import annotations
 
-import json
+import asyncio
 import logging
 from typing import TYPE_CHECKING
 
+import websockets
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route
+from starlette.routing import Route, WebSocketRoute
+from starlette.websockets import WebSocket
 
 if TYPE_CHECKING:
     from .pool import BrowserPool
@@ -66,20 +68,28 @@ def create_health_app(pool: BrowserPool) -> Starlette:
 
     async def next_endpoint(request: Request) -> Response:
         """
-        Get the next available endpoint using round-robin.
+        Get the next available proxied endpoint using round-robin.
 
         This is the primary endpoint for clients to get a browser.
         """
-        endpoint = await pool.get_next_endpoint()
+        instance = await pool.get_next_instance()
 
-        if endpoint is None:
+        if instance is None or instance.proxy_endpoint is None:
             return JSONResponse(
                 {"error": "No healthy browser instances available"},
                 status_code=503,
             )
 
         return JSONResponse({
-            "endpoint": endpoint,
+            "endpoint": instance.proxy_endpoint,
+            "proxy_endpoint": instance.proxy_endpoint,
+            "browser": {
+                "index": instance.index,
+                "status": instance.status,
+                "healthy": instance.is_healthy,
+                "connections": instance.connections,
+                "total_connections": instance.total_connections,
+            },
         })
 
     async def stats(request: Request) -> Response:
@@ -134,14 +144,81 @@ def create_health_app(pool: BrowserPool) -> Starlette:
                 "humanize": pool.settings.humanize,
                 "block_images": pool.settings.block_images,
                 "proxy": "configured" if pool.settings.proxy else None,
+                "public_ws_url": pool.settings.get_public_ws_base_url(),
             },
         })
+
+    async def websocket_proxy(websocket: WebSocket) -> None:
+        """Proxy a client WebSocket connection to a browser instance."""
+        token = websocket.path_params.get("token")
+        instance = pool.get_instance_by_proxy_token(token) if token else None
+
+        if (
+            instance is None
+            or not instance.is_healthy
+            or instance.ws_endpoint is None
+            or instance.process is None
+            or instance.process.returncode is not None
+        ):
+            await websocket.close(code=1008)
+            return
+
+        upstream = None
+        counted_connection = False
+        try:
+            upstream = await websockets.connect(instance.ws_endpoint)
+            await websocket.accept()
+            instance.connections += 1
+            instance.total_connections += 1
+            counted_connection = True
+
+            async def client_to_browser() -> None:
+                while True:
+                    message = await websocket.receive()
+                    message_type = message.get("type")
+                    if message_type == "websocket.disconnect":
+                        break
+                    if "text" in message:
+                        await upstream.send(message["text"])
+                    elif "bytes" in message:
+                        await upstream.send(message["bytes"])
+
+            async def browser_to_client() -> None:
+                async for message in upstream:
+                    if isinstance(message, bytes):
+                        await websocket.send_bytes(message)
+                    else:
+                        await websocket.send_text(message)
+
+            tasks = [
+                asyncio.create_task(client_to_browser()),
+                asyncio.create_task(browser_to_client()),
+            ]
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                task.result()
+        except Exception as exc:
+            if pool.settings.debug:
+                logger.debug("WebSocket proxy error for browser %s: %s", instance.index, exc)
+            try:
+                await websocket.close(code=1011)
+            except RuntimeError:
+                pass
+        finally:
+            if counted_connection and instance.connections > 0:
+                instance.connections -= 1
+            if upstream is not None:
+                await upstream.close()
 
     routes = [
         Route("/", info, methods=["GET"]),
         Route("/health", health, methods=["GET"]),
         Route("/endpoints", endpoints, methods=["GET"]),
         Route("/next", next_endpoint, methods=["GET"]),
+        WebSocketRoute("/ws/{token}", websocket_proxy),
         Route("/stats", stats, methods=["GET"]),
         Route("/restart/{index:int}", restart_instance, methods=["POST"]),
     ]

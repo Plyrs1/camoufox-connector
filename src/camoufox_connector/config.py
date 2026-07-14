@@ -78,6 +78,11 @@ class Settings(BaseSettings):
         description="Host to bind the HTTP API to",
     )
 
+    public_ws_url: Optional[str] = Field(
+        default=None,
+        description="Public WebSocket base URL for proxied browser endpoints",
+    )
+
     # Browser configuration
     headless: bool = Field(
         default=True,
@@ -122,6 +127,16 @@ class Settings(BaseSettings):
             raise ValueError("Proxy must start with http://, https://, or socks5://")
         return v
 
+    @field_validator("public_ws_url")
+    @classmethod
+    def validate_public_ws_url(cls, v: Optional[str]) -> Optional[str]:
+        """Validate public WebSocket URL format."""
+        if v is None or v == "":
+            return None
+        if not v.startswith(("ws://", "wss://")):
+            raise ValueError("Public WebSocket URL must start with ws:// or wss://")
+        return v.rstrip("/")
+
     @model_validator(mode='after')
     def validate_geoip_requires_proxy(self) -> 'Settings':
         """Warn and disable geoip if no proxy is configured."""
@@ -132,6 +147,10 @@ class Settings(BaseSettings):
             )
             self.geoip = False
         return self
+
+    def get_public_ws_base_url(self) -> str:
+        """Get the public WebSocket base URL for proxied endpoints."""
+        return self.public_ws_url or f"ws://localhost:{self.api_port}"
 
     @classmethod
     def from_json(cls, path: str | Path) -> Settings:

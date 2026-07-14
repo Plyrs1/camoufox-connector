@@ -12,11 +12,64 @@ def _fake_file(content: str):
 
 import pytest
 
+from camoufox_connector.config import Settings
 from camoufox_connector.pool import (
     _find_pids_for_inodes,
     _get_listening_inodes_for_port,
+    BrowserInstance,
     BrowserPool,
 )
+
+
+class TestBrowserInstanceStatus:
+    """Tests for BrowserInstance.status."""
+
+    def test_status_inactive_without_process_or_endpoint(self):
+        instance = BrowserInstance(index=0, port=9222)
+
+        assert instance.status == "inactive"
+
+    def test_status_error_when_unhealthy_with_endpoint(self):
+        instance = BrowserInstance(index=0, port=9222)
+        instance.process = object()
+        instance.ws_endpoint = "ws://127.0.0.1:9222/browser"
+        instance.is_healthy = False
+
+        assert instance.status == "error"
+
+    def test_status_idle_when_healthy_without_connections(self):
+        instance = BrowserInstance(index=0, port=9222)
+        instance.process = object()
+        instance.ws_endpoint = "ws://127.0.0.1:9222/browser"
+        instance.is_healthy = True
+
+        assert instance.status == "idle"
+
+    def test_status_busy_when_healthy_with_connections(self):
+        instance = BrowserInstance(index=0, port=9222)
+        instance.process = object()
+        instance.ws_endpoint = "ws://127.0.0.1:9222/browser"
+        instance.is_healthy = True
+        instance.connections = 1
+
+        assert instance.status == "busy"
+
+
+class TestProxyEndpoints:
+    """Tests for BrowserPool proxy endpoint helpers."""
+
+    def test_build_proxy_endpoint_uses_public_ws_url(self):
+        pool = BrowserPool(Settings(geoip=False, public_ws_url="wss://browser.example.com"))
+
+        assert pool._build_proxy_endpoint("abc") == "wss://browser.example.com/ws/abc"
+
+    def test_get_instance_by_proxy_token(self):
+        pool = BrowserPool(Settings(geoip=False))
+        instance = BrowserInstance(index=0, port=9222, proxy_token="abc")
+        pool.instances.append(instance)
+
+        assert pool.get_instance_by_proxy_token("abc") is instance
+        assert pool.get_instance_by_proxy_token("missing") is None
 
 
 class TestIsPortFree:

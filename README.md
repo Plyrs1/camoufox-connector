@@ -52,11 +52,11 @@ flowchart TB
 
 **How it works:**
 1. **Clients** (Node.js, Go, Python, etc.) connect via Playwright
-2. **HTTP API** provides endpoints via `GET /next` (round-robin)
+2. **HTTP API** provides proxied endpoints via `GET /next` (round-robin)
 3. **Load Balancer** distributes connections across browser instances
 4. **Browser Pool** maintains multiple Camoufox instances with unique fingerprints
-5. Each client gets a **WebSocket endpoint** to connect directly to a browser
-6. **WebSocket ports** are dynamically assigned by camoufox (use host network mode in Docker for pool mode)
+5. Each client gets a connector-hosted **WebSocket proxy endpoint**
+6. Internal browser WebSocket ports stay behind the connector proxy
 
 ---
 
@@ -74,7 +74,7 @@ Rotating proxies, Anti-Bot technology and headless browsers to CAPTCHAs. It's ne
 
 Camoufox is a powerful anti-detect browser based on Firefox, but its Python-only interface limits accessibility. Camoufox Connector solves this by:
 
-- **Exposing WebSocket endpoints** that any Playwright client can connect to
+- **Exposing proxied WebSocket endpoints** that any Playwright client can connect to
 - **Managing browser pools** for high-volume scraping with fingerprint rotation
 - **Providing health monitoring** via HTTP API
 - **Simplifying deployment** with Docker support
@@ -177,7 +177,7 @@ func main() {
     
     // Get endpoint from connector API
     // endpoint := getEndpointFromAPI()
-    endpoint := "ws://localhost:9222/abc123"
+    endpoint := "ws://localhost:8080/ws/stable-token"
     
     browser, _ := pw.Firefox.Connect(endpoint)
     page, _ := browser.NewPage()
@@ -240,7 +240,7 @@ camoufox-connector --mode pool --pool-size 5
 
 ## HTTP API
 
-The connector exposes an HTTP API for health monitoring and browser management.
+The connector exposes an HTTP API for health monitoring and browser management. For full usage instructions, request/response schemas, status codes, and client examples, see [`docs/API.md`](docs/API.md).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
@@ -256,7 +256,15 @@ The connector exposes an HTTP API for health monitoring and browser management.
 **GET /next**
 ```json
 {
-  "endpoint": "ws://localhost:9222/abc123def456"
+  "endpoint": "ws://localhost:8080/ws/stable-token",
+  "proxy_endpoint": "ws://localhost:8080/ws/stable-token",
+  "browser": {
+    "index": 0,
+    "status": "idle",
+    "healthy": true,
+    "connections": 0,
+    "total_connections": 12
+  }
 }
 ```
 
@@ -266,9 +274,9 @@ The connector exposes an HTTP API for health monitoring and browser management.
   "status": "healthy",
   "mode": "pool",
   "instances": [
-    {"index": 0, "healthy": true, "endpoint": "ws://..."},
-    {"index": 1, "healthy": true, "endpoint": "ws://..."},
-    {"index": 2, "healthy": true, "endpoint": "ws://..."}
+    {"index": 0, "healthy": true, "endpoint": "ws://localhost:8080/ws/token-a", "status": "idle"},
+    {"index": 1, "healthy": true, "endpoint": "ws://localhost:8080/ws/token-b", "status": "busy"},
+    {"index": 2, "healthy": true, "endpoint": "ws://localhost:8080/ws/token-c", "status": "idle"}
   ]
 }
 ```
@@ -301,7 +309,8 @@ Options:
   --pool-size N          Number of browser instances in pool mode (default: 3)
   --api-port PORT        HTTP API port (default: 8080)
   --api-host HOST        HTTP API host (default: 0.0.0.0)
-  --ws-port-start PORT   Starting port for WebSocket endpoints (default: 9222)
+  --ws-port-start PORT   Starting port for internal browser WebSocket endpoints (default: 9222)
+  --public-ws-url URL    Public WebSocket base URL for proxy endpoints
   --headless             Run browsers in headless mode (default)
   --no-headless          Run browsers in headed mode
   --geoip                Enable GeoIP spoofing (default)
@@ -321,6 +330,7 @@ All options can be set via `CAMOUFOX_` prefixed environment variables:
 ```bash
 export CAMOUFOX_MODE=pool
 export CAMOUFOX_POOL_SIZE=5
+export CAMOUFOX_PUBLIC_WS_URL=ws://localhost:8080
 export CAMOUFOX_HEADLESS=true
 export CAMOUFOX_PROXY=http://user:pass@host:port
 
@@ -333,6 +343,7 @@ camoufox-connector
 {
   "mode": "pool",
   "pool_size": 5,
+  "public_ws_url": "ws://localhost:8080",
   "headless": true,
   "geoip": true,
   "humanize": true,
@@ -447,7 +458,7 @@ async function scrapeUrls(urls) {
 ```javascript
 // Use a specific endpoint for session persistence
 const { endpoints } = await fetch('http://localhost:8080/endpoints').then(r => r.json());
-const sessionEndpoint = endpoints[0];  // Always use the same browser
+const sessionEndpoint = endpoints[0].endpoint;  // Always use the same browser
 
 // Login once
 let browser = await firefox.connect(sessionEndpoint);
@@ -518,8 +529,8 @@ camoufox-connector --no-geoip
 # Check if server is running
 curl http://localhost:8080/health
 
-# Check if browser WebSocket is accessible
-curl -I ws://localhost:9222
+# Check the current public WebSocket proxy endpoint
+curl http://localhost:8080/next
 ```
 
 ### Out of memory in Docker

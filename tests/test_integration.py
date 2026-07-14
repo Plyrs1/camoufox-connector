@@ -181,8 +181,8 @@ async def test_round_robin_endpoint_distribution(pool):
     assert ep2 is not None
 
     stats = pool.get_stats()
-    assert stats["total_connections"] == 2
-    assert stats["active_connections"] == 2
+    assert stats["total_connections"] == 0
+    assert stats["active_connections"] == 0
 
-    # Release tracking is not exposed directly, but we verified the endpoints
-    # were returned without errors
+    # Endpoint selection does not count as an active connection; the WebSocket
+    # proxy increments counters only when a client actually connects.

@@ -94,6 +94,14 @@ Environment variables:
         help="Starting port for browser WebSocket endpoints (default: 9222)",
     )
 
+    parser.add_argument(
+        "--public-ws-url",
+        type=str,
+        default=None,
+        metavar="URL",
+        help="Public WebSocket base URL for proxied endpoints (default: ws://localhost:<api-port>)",
+    )
+
     # Browser configuration
     parser.add_argument(
         "--headless",
@@ -218,7 +226,7 @@ class Server:
         print()
         print("  Browser endpoints:")
         for endpoint in endpoints:
-            print(f"    - {endpoint}")
+            print(f"    - {endpoint['proxy_endpoint']} ({endpoint['status']})")
         print()
         print("  API Routes:")
         print(f"    GET  /         - Server info")
