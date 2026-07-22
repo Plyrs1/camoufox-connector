@@ -141,7 +141,8 @@ Client (Node.js/Go/Python/Java/etc.)
 - Called as: `python -m camoufox_connector.launcher <json_config>`
 - Loads config via `camoufox.utils.launch_options()`
 - Filters out `None` values (workaround for camoufox 0.4.11 null-proxy bug)
-- Spawns Node.js with `preexec_fn=os.setsid()` to create process group
+- Spawns Node.js as: `node launchServer.js <playwright-driver-package>` (argv[2] required by camoufox 0.5.x)
+- Uses `preexec_fn=os.setsid()` to create process group
 - Forwards `SIGTERM`/`SIGINT` to entire process group via `os.killpg()`
 
 ### 5.4 `health.py` — HTTP API

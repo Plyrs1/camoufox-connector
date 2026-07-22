@@ -60,18 +60,20 @@ def main() -> None:
     # proxy=None gets serialised as null and breaks the Node.js server.
     config = {k: v for k, v in config.items() if v is not None}
 
-    # Resolve paths
+    # Resolve paths.  camoufox 0.5.x launchServer.js requires the Playwright
+    # driver package directory as argv[2] (see camoufox.server.launch_server).
     launch_script = LOCAL_DATA / "launchServer.js"
     _nodejs = compute_driver_executable()[0]
     nodejs = _nodejs[0] if isinstance(_nodejs, tuple) else _nodejs
+    driver_package = Path(nodejs).parent / "package"
 
     data = orjson.dumps(to_camel_case_dict(config))
 
     # Spawn Node.js in a new process group.
     # preexec_fn runs in the child before exec() and is POSIX-only.
     process = subprocess.Popen(
-        [nodejs, str(launch_script)],
-        cwd=Path(nodejs).parent / "package",
+        [nodejs, str(launch_script), str(driver_package)],
+        cwd=driver_package,
         stdin=subprocess.PIPE,
         text=True,
         preexec_fn=_setup_process_group,
@@ -97,7 +99,9 @@ def main() -> None:
     except KeyboardInterrupt:
         _forward_signal(signal.SIGINT, None)
 
-    raise RuntimeError("Server process terminated unexpectedly")
+    raise RuntimeError(
+        f"Server process terminated unexpectedly with exit code {process.returncode}"
+    )
 
 
 if __name__ == "__main__":
