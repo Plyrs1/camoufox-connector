@@ -295,10 +295,13 @@ Integration tests use port range 59000+ to avoid collisions and have 120s timeou
 ### Dockerfile
 - Based on `python:3.11-slim`
 - Installs browser system deps (fonts, GTK, NSS, Xvfb, etc.)
-- Pre-downloads Camoufox binaries with `camoufox fetch`
+- Pre-downloads Camoufox binaries with `camoufox fetch` into `/root/.cache/camoufox`
 - Exposes port 8080 (API) and 9222–9230 (WebSocket)
 - Health check hits `/health`
-- Entry point: `python -m camoufox_connector.server`
+- Entry point: `/app/start.sh` (runs optional VNC stack, then `python -m camoufox_connector.server`)
+
+### `start.sh`
+- If Camoufox browsers are missing under `$XDG_CACHE_HOME/camoufox` or `~/.cache/camoufox`, runs `camoufox fetch` before starting the server (fallback when image cache was wiped/hidden)
 
 ### Docker Compose Profiles
 - **`camoufox`** (default): Single browser, ports `8080:8080` + `9222:9222`
@@ -306,6 +309,8 @@ Integration tests use port range 59000+ to avoid collisions and have 120s timeou
 - **`camoufox-proxy`** (`--profile proxy`): Pool mode with proxy, ports `8080:8080` + `9222-9230:9222-9230`
 
 > Pool mode requires `network_mode: host` on Linux because Camoufox assigns WebSocket ports dynamically.
+>
+> Do **not** mount an empty volume over `/root/.cache/camoufox` — that path already has build-time browser binaries and an empty mount causes `CamoufoxNotInstalled`.
 
 ### CI/CD
 - `.github/workflows/docker.yml`: Builds and pushes to `ghcr.io` on `v*` tags
@@ -316,6 +321,7 @@ Integration tests use port range 59000+ to avoid collisions and have 120s timeou
 
 | Issue | Cause / Fix |
 |-------|-------------|
+| `CamoufoxNotInstalled: official/stable is not installed` | Empty volume mounted over `/root/.cache/camoufox` hid build-time binaries. Remove the mount (or seed the volume) and restart; `start.sh` will run `camoufox fetch` if the cache is empty |
 | `InvalidDatabaseError` | GeoIP DB missing. Install with `pip install camoufox[geoip]` or use `--no-geoip` |
 | `geoip=True` warning at startup | GeoIP requires a proxy. Set `PROXY` or use `--no-geoip` |
 | Port already in use on restart | Pool's port reclamation should handle this automatically (Linux `/proc` scan) |

@@ -27,8 +27,8 @@ services:
       start_period: 30s
     # Shared memory size (required for browsers)
     shm_size: 2gb
-    volumes:
-      - camoufox-cache:/root/.cache/camoufox
+    # Do not mount over /root/.cache/camoufox — an empty volume hides
+    # browser binaries pre-fetched into the image by `camoufox fetch`.
 
   # Pool mode with multiple browser instances
   # NOTE: WebSocket ports are dynamically assigned by camoufox.
@@ -57,8 +57,6 @@ services:
       start_period: 60s
     # More shared memory for multiple browsers
     shm_size: 4gb
-    volumes:
-      - camoufox-cache:/root/.cache/camoufox
     deploy:
       resources:
         limits:
@@ -81,12 +79,6 @@ services:
       - CAMOUFOX_PROXY=${PROXY_URL:-}
     restart: unless-stopped
     shm_size: 4gb
-    volumes:
-      - camoufox-cache:/root/.cache/camoufox
-
-volumes:
-  camoufox-cache:
-    name: camoufox-browser-cache
 
 networks:
   default:

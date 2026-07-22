@@ -366,7 +366,6 @@ docker build -t camoufox-connector .
 # Run in single mode
 docker run -p 8080:8080 -p 9222:9222 \
   --shm-size=2gb \
-  -v camoufox-cache:/root/.cache/camoufox \
   camoufox-connector
 
 # Run in pool mode (Linux: use host network for dynamic ports)
@@ -374,11 +373,12 @@ docker run --network host \
   -e CAMOUFOX_MODE=pool \
   -e CAMOUFOX_POOL_SIZE=5 \
   --shm-size=4gb \
-  -v camoufox-cache:/root/.cache/camoufox \
   camoufox-connector
 ```
 
 > **Note:** Pool mode uses `--network host` because camoufox assigns WebSocket ports dynamically. On Windows/Mac, run natively or use a Linux VM.
+>
+> Do **not** mount an empty volume over `/root/.cache/camoufox`. That path already contains browsers downloaded at image build time (`camoufox fetch`). An empty mount hides them and causes `CamoufoxNotInstalled`.
 
 ### Docker Compose
 
@@ -403,8 +403,6 @@ services:
       - CAMOUFOX_MODE=single
       - CAMOUFOX_HEADLESS=true
     shm_size: 2gb
-    volumes:
-      - camoufox-cache:/root/.cache/camoufox
     restart: unless-stopped
 
   camoufox-pool:
@@ -416,16 +414,10 @@ services:
       - CAMOUFOX_POOL_SIZE=5
       - CAMOUFOX_HEADLESS=true
     shm_size: 4gb
-    volumes:
-      - camoufox-cache:/root/.cache/camoufox
     restart: unless-stopped
-
-volumes:
-  camoufox-cache:
-    name: camoufox-browser-cache
 ```
 
-> **Note:** The `camoufox-cache` volume persists browser binaries between container restarts, improving startup time. Pool mode requires `network_mode: host` on Linux to support dynamically assigned WebSocket ports.
+> **Note:** Browser binaries are baked into the image via `camoufox fetch` during the Docker build. Avoid mounting a volume over `/root/.cache/camoufox` unless it already contains a valid Camoufox install. Pool mode requires `network_mode: host` on Linux to support dynamically assigned WebSocket ports.
 
 
 ## Use Cases

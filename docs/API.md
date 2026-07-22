@@ -592,6 +592,7 @@ docker compose --profile proxy up
 
 | Issue | Cause or Fix |
 |---|---|
+| `CamoufoxNotInstalled: official/stable is not installed` | Empty volume over `/root/.cache/camoufox` hid image-layer binaries from `camoufox fetch`. Remove the mount (or seed the volume) and restart. |
 | `GET /next` returns `503` | No browser instance is healthy yet, startup failed, or all browsers exited. Check connector logs and `GET /health`. |
 | `geoip=True` warning | GeoIP requires a proxy. Set `CAMOUFOX_PROXY` or disable GeoIP with `CAMOUFOX_GEOIP=false` or `--no-geoip`. |
 | Cannot connect to WebSocket in Docker pool mode | Use Linux host networking or expose the required WebSocket port range. |

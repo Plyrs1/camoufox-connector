@@ -1,6 +1,20 @@
 #!/bin/bash
 set -e
 
+# Camoufox stores browsers under platformdirs user_cache_dir("camoufox")
+# (default: /root/.cache/camoufox). An empty volume mount over that path
+# hides image-layer binaries from `camoufox fetch` at build time.
+if [[ -n "${XDG_CACHE_HOME:-}" ]]; then
+  INSTALL_DIR="${XDG_CACHE_HOME}/camoufox"
+else
+  INSTALL_DIR="${HOME:-/root}/.cache/camoufox"
+fi
+
+if [[ ! -d "${INSTALL_DIR}/browsers" ]] || [[ -z "$(ls -A "${INSTALL_DIR}/browsers" 2>/dev/null || true)" ]]; then
+  echo "Camoufox browser binaries not found at ${INSTALL_DIR}; running camoufox fetch..."
+  camoufox fetch
+fi
+
 if [[ "${CAMOUFOX_HEADLESS}" != "true" ]]; then
     # Start Xvfb
     echo "Starting Xvfb..."
