@@ -99,9 +99,13 @@ def main() -> None:
     except KeyboardInterrupt:
         _forward_signal(signal.SIGINT, None)
 
-    raise RuntimeError(
-        f"Server process terminated unexpectedly with exit code {process.returncode}"
-    )
+    exit_code = int(process.returncode) if process.returncode is not None else 1
+    if exit_code != 0:
+        print(
+            f"Camoufox Node server exited unexpectedly (node_exit_code={exit_code})",
+            file=sys.stderr,
+        )
+    sys.exit(exit_code)
 
 
 if __name__ == "__main__":

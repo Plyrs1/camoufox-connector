@@ -11,6 +11,7 @@ def _fake_file(content: str):
     return StringIO(content)
 
 import pytest
+from types import SimpleNamespace
 
 from camoufox_connector.config import Settings
 from camoufox_connector.pool import (
@@ -165,6 +166,59 @@ class TestGetListeningInodes:
     def test_returns_empty_on_missing_proc(self, _mock):
         inodes = _get_listening_inodes_for_port(8080)
         assert inodes == set()
+
+
+class TestHealthCheckAutoRestart:
+    @pytest.mark.asyncio
+    async def test_restarts_dead_unleased_instance(self):
+        pool = BrowserPool(Settings(geoip=False))
+        instance = BrowserInstance(index=0, port=9222, is_healthy=True, leased=False)
+        instance.process = SimpleNamespace(returncode=1, pid=1234)
+        instance.ws_endpoint = "ws://127.0.0.1:9222/test"
+        instance.proxy_token = "token"
+        instance.proxy_endpoint = "ws://localhost:8080/ws/token"
+        pool.instances = [instance]
+
+        with patch.object(pool, "_restart_instance_work", return_value=True) as mock_restart:
+            result = await pool.health_check()
+
+        assert result["healthy"] is False
+        mock_restart.assert_called_once_with(instance)
+
+    @pytest.mark.asyncio
+    async def test_does_not_restart_dead_leased_instance(self):
+        pool = BrowserPool(Settings(geoip=False))
+        instance = BrowserInstance(index=0, port=9222, is_healthy=True, leased=True)
+        instance.process = SimpleNamespace(returncode=1, pid=1234)
+        instance.ws_endpoint = "ws://127.0.0.1:9222/test"
+        instance.proxy_token = "token"
+        instance.proxy_endpoint = "ws://localhost:8080/ws/token"
+        pool.instances = [instance]
+
+        with patch.object(pool, "_restart_instance_work", return_value=True) as mock_restart:
+            result = await pool.health_check()
+
+        assert result["healthy"] is False
+        mock_restart.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_restart_schedule_guard_avoids_duplicate(self):
+        pool = BrowserPool(Settings(geoip=False))
+        instance = BrowserInstance(index=0, port=9222)
+
+        blocker = asyncio.Future()
+
+        async def slow_restart(_instance):
+            await blocker
+            return True
+
+        with patch.object(pool, "_restart_instance_work", side_effect=slow_restart):
+            first = pool._schedule_restart(instance)
+            second = pool._schedule_restart(instance)
+            assert first is not None
+            assert second is None
+            blocker.set_result(True)
+            await first
 
 
 class TestFindPidsForInodes:

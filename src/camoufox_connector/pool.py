@@ -20,6 +20,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
+from collections.abc import Awaitable, Callable
 
 from .config import Settings
 
@@ -97,6 +98,7 @@ class BrowserPool:
     _current_index: int = 0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _running: bool = False
+    _restart_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
 
     async def start(self) -> None:
         """Start all browser instances in the pool."""
@@ -354,35 +356,43 @@ class BrowserPool:
 
     async def _stop_instance(self, instance: BrowserInstance) -> None:
         """Stop a single browser instance with orphan cleanup."""
-        if instance.process is None:
-            return
-
         port = instance.port
         process = instance.process
 
         try:
-            # Step 1: graceful termination — launcher forwards SIGTERM to the group
-            process.terminate()
-            try:
-                await asyncio.wait_for(process.wait(), timeout=5.0)
-            except asyncio.TimeoutError:
-                # Step 2: force kill launcher directly
-                logger.warning(f"Force killing browser instance {instance.index}")
-                process.kill()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=5.0)
-                except asyncio.TimeoutError:
-                    logger.warning(f"Cannot kill browser instance {instance.index}")
+            if process is not None:
+                # Step 1: terminate launcher process if still alive
+                if process.returncode is None:
+                    process.terminate()
+                    try:
+                        await asyncio.wait_for(process.wait(), timeout=5.0)
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Force killing browser instance {instance.index}")
+                        process.kill()
+                        try:
+                            await asyncio.wait_for(process.wait(), timeout=5.0)
+                        except asyncio.TimeoutError:
+                            logger.warning(f"Cannot kill browser instance {instance.index}")
+                else:
+                    logger.warning(
+                        "Launcher for browser instance %s already exited with code %s",
+                        instance.index,
+                        process.returncode,
+                    )
 
-            # Step 3: port-based orphan cleanup if the port is still occupied
+            # Step 2: always reclaim any remaining process that still owns the instance port
             if not self._is_port_free(port):
                 logger.warning(f"Port {port} still occupied after stop — hunting orphans")
+                launcher_pid = process.pid if process is not None else None
                 for pid in self._find_pids_binding_port(port):
+                    if launcher_pid is not None and pid == launcher_pid:
+                        continue
                     await self._kill_process_tree(pid)
 
         except Exception as e:
             logger.error(f"Error stopping browser instance {instance.index}: {e}")
         finally:
+            instance.process = None
             instance.is_healthy = False
             instance.ws_endpoint = None
             instance.proxy_token = None
@@ -482,6 +492,9 @@ class BrowserPool:
         async with self._lock:
             if instance.leased:
                 return False
+        return await self._restart_instance_work(instance)
+
+    async def _restart_instance_work(self, instance: BrowserInstance) -> bool:
         await self._stop_instance(instance)
 
         # Reset instance state
@@ -496,8 +509,25 @@ class BrowserPool:
             await self._start_instance(instance)
             return True
         except Exception as e:
-            logger.error(f"Failed to restart instance {index}: {e}")
+            logger.error(f"Failed to restart instance {instance.index}: {e}")
             return False
+
+    def _schedule_restart(self, instance: BrowserInstance) -> Optional[asyncio.Task[None]]:
+        existing = self._restart_tasks.get(instance.index)
+        if existing is not None and not existing.done():
+            return None
+
+        async def _runner() -> None:
+            try:
+                await self._restart_instance_work(instance)
+            finally:
+                current = self._restart_tasks.get(instance.index)
+                if current is asyncio.current_task():
+                    self._restart_tasks.pop(instance.index, None)
+
+        task = asyncio.create_task(_runner())
+        self._restart_tasks[instance.index] = task
+        return task
 
     async def health_check(self) -> dict:
         """Perform health check on all instances."""
@@ -505,6 +535,8 @@ class BrowserPool:
             "healthy": True,
             "instances": [],
         }
+
+        restart_tasks: list[Awaitable[None]] = []
 
         for instance in self.instances:
             instance.last_health_check = time.time()
@@ -518,6 +550,15 @@ class BrowserPool:
             if not is_alive and instance.is_healthy:
                 logger.warning(f"Browser instance {instance.index} died unexpectedly")
                 instance.is_healthy = False
+                if instance.leased:
+                    logger.warning(
+                        "Browser instance %s is leased; skipping auto-restart and keeping it unavailable",
+                        instance.index,
+                    )
+                else:
+                    task = self._schedule_restart(instance)
+                    if task is not None:
+                        restart_tasks.append(task)
 
             results["instances"].append({
                 "index": instance.index,
@@ -526,6 +567,9 @@ class BrowserPool:
                 "proxy_endpoint": instance.proxy_endpoint,
                 "status": instance.status,
             })
+
+        if restart_tasks:
+            await asyncio.gather(*restart_tasks, return_exceptions=True)
 
         results["healthy"] = any(inst.is_healthy for inst in self.instances)
         return results

@@ -54,8 +54,10 @@ class TestLauncherMain:
 
                         with patch("os.getpgid", return_value=1234):
                             with patch("os.killpg"):
-                                with pytest.raises(RuntimeError, match="terminated unexpectedly"):
+                                with pytest.raises(SystemExit) as exc:
                                     main()
+
+        assert exc.value.code == 1
 
         # launch_options was called with original kwargs (including None)
         mock_launch.assert_called_once_with(**test_kwargs)
@@ -92,10 +94,10 @@ class TestLauncherMain:
                         with patch("signal.signal") as mock_signal:
                             with patch("os.getpgid", return_value=5678):
                                 with patch("os.killpg"):
-                                    with pytest.raises(
-                                        RuntimeError, match="terminated unexpectedly"
-                                    ):
+                                    with pytest.raises(SystemExit) as exc:
                                         main()
+
+        assert exc.value.code == 1
 
         # signal.signal should have been called for SIGTERM and SIGINT
         calls = [c[0] for c in mock_signal.call_args_list]

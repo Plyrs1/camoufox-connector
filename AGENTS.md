@@ -133,8 +133,9 @@ Client (Node.js/Go/Python/Java/etc.)
   - `stop()`: graceful shutdown with SIGTERM → SIGKILL cascade
   - `get_next_endpoint()`: round-robin across healthy instances (async-safe with lock)
   - `restart_instance(index)`: stop + start a specific instance
-  - `health_check()`: checks process liveness
-  - Port reclamation: scans `/proc/net/tcp` + `/proc/*/fd/` to find stale PIDs holding ports
+  - `health_check()`: checks process liveness; auto-restarts unexpectedly dead *unleased* instances while skipping leased ones
+  - Port reclamation: scans `/proc/net/tcp` + `/proc/*/fd/` to find stale PIDs holding ports; re-runs after any stop regardless of launcher exit state
+  - Per-instance restart guard prevents duplicate concurrent restart tasks
 
 > **Important:** Port tracking is **Linux-only**. Windows support would need `netstat` or `GetExtendedTcpTable`.
 
