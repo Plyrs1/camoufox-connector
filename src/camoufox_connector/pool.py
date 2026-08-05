@@ -40,6 +40,7 @@ class BrowserInstance:
     connections: int = 0
     total_connections: int = 0
     is_healthy: bool = False
+    leased: bool = False
     last_health_check: Optional[float] = None
 
     @property
@@ -72,6 +73,7 @@ class BrowserInstance:
             "connections": self.connections,
             "total_connections": self.total_connections,
             "is_healthy": self.is_healthy,
+            "leased": self.leased,
         }
 
 
@@ -398,20 +400,30 @@ class BrowserPool:
             Browser instance or None if no healthy instances are available.
         """
         async with self._lock:
-            if not self.instances:
-                return None
+            return await self._get_next_instance_locked()
 
-            attempts = 0
-            while attempts < len(self.instances):
-                instance = self.instances[self._current_index]
-                self._current_index = (self._current_index + 1) % len(self.instances)
+    async def lease_next_instance(self) -> Optional[BrowserInstance]:
+        """Atomically select and reserve the next healthy instance."""
+        async with self._lock:
+            instance = await self._get_next_instance_locked()
+            if instance is not None:
+                instance.leased = True
+            return instance
 
-                if instance.is_healthy and instance.ws_endpoint and instance.proxy_endpoint:
-                    return instance
+    async def release_instance(self, instance: BrowserInstance) -> None:
+        """Atomically release an instance reservation."""
+        async with self._lock:
+            instance.leased = False
 
-                attempts += 1
-
+    async def _get_next_instance_locked(self) -> Optional[BrowserInstance]:
+        if not self.instances:
             return None
+        for _ in range(len(self.instances)):
+            instance = self.instances[self._current_index]
+            self._current_index = (self._current_index + 1) % len(self.instances)
+            if instance.is_healthy and not instance.leased and instance.ws_endpoint and instance.proxy_endpoint:
+                return instance
+        return None
 
     async def get_next_endpoint(self) -> Optional[str]:
         """
@@ -467,6 +479,9 @@ class BrowserPool:
             return False
 
         instance = self.instances[index]
+        async with self._lock:
+            if instance.leased:
+                return False
         await self._stop_instance(instance)
 
         # Reset instance state

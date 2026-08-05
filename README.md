@@ -355,6 +355,32 @@ camoufox-connector
 camoufox-connector --config config.json
 ```
 
+## MCP Browser Control API
+
+When enabled with `CAMOUFOX_MCP_ENABLED=true`, the connector exposes the MCP Streamable HTTP transport at `http://localhost:8080/mcp` (the MCP transport endpoint is not `/mcp/mcp`). By default only localhost Host headers are accepted. A configured host is added to those local defaults. For a remote client, set `CAMOUFOX_MCP_HOST=10.10.0.11:53000` (or a hostname with its port); this configures the SDK DNS-rebinding allowlist without weakening protection. A host without a port uses the API port; append `:*` only when deliberately allowing any port. Wildcards are not enabled by default. Configure an MCP client with:
+
+```json
+{"url":"http://localhost:8080/mcp"}
+```
+
+Create an explicit browser session first, pass its returned `session_id` to every subsequent call, then close it:
+
+```text
+create_session -> navigate/snapshot/click/fill/evaluate/screenshot/tabs/new_tab/select_tab/close_tab -> close_session
+```
+
+Available tools are `create_session`, `close_session`, `navigate`, `snapshot`, `click`, `fill`, `evaluate`, `screenshot`, `tabs`, `new_tab`, `select_tab`, and `close_tab`. Sessions preserve the same browser, context, page, and pool instance. They expire after 1800 seconds of inactivity by default, releasing the lease automatically. In pool mode, leased instances are excluded from new sessions and cannot be restarted until released; pool exhaustion returns an error.
+
+| Variable | Default | Description |
+|---|---:|---|
+| `CAMOUFOX_MCP_ENABLED` | `false` | Opt-in embedded MCP server |
+| `CAMOUFOX_MCP_PATH` | `/mcp` | Streamable HTTP mount path |
+| `CAMOUFOX_MCP_HOST` | *(unset; localhost only)* | External MCP Host hostname/IP, optionally with port |
+| `CAMOUFOX_MCP_SESSION_TIMEOUT` | `1800` | Idle explicit browser-session timeout in seconds |
+| `CAMOUFOX_MCP_STATE_DIR` | `.camoufox-connector/mcp-state` | Server-side persistent state backup directory |
+
+MCP also provides keyboard and mouse input tools plus opaque-ID browser-state backups (`backup_state`, `list_state_backups`, `restore_state`, and `delete_state_backup`). Backups contain cookies and web storage, never session IDs or host paths. In Docker, mount persistent storage at `/var/lib/camoufox-connector/mcp-state`.
+
 ## Docker
 
 ### Quick Start with Docker

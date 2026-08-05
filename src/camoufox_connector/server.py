@@ -170,6 +170,14 @@ Environment variables:
         help="Load configuration from JSON file",
     )
 
+    # MCP
+    parser.add_argument("--mcp-enabled", dest="mcp_enabled", action="store_true", default=None, help="Enable embedded MCP")
+    parser.add_argument("--no-mcp", dest="mcp_enabled", action="store_false", help="Disable embedded MCP")
+    parser.add_argument("--mcp-path", default=None, help="MCP Streamable HTTP path (default: /mcp)")
+    parser.add_argument("--mcp-host", default=None, help="External MCP hostname/IP, optionally with port")
+    parser.add_argument("--mcp-session-timeout", type=float, default=None, help="MCP idle timeout in seconds (default: 1800)")
+    parser.add_argument("--mcp-state-dir", default=None, help="Directory for MCP state backups")
+
     # Debug
     parser.add_argument(
         "--debug",

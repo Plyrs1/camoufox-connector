@@ -1,46 +1,32 @@
 # Camoufox Connector - Docker Compose Configuration
-#
-# Usage:
-#   Single mode:  docker compose up
-#   Pool mode:    docker compose --profile pool up
-#   Custom config: docker compose -f docker-compose.yml -f docker-compose.custom.yml up
-
 services:
-  # Single browser instance mode
   camoufox:
     build: .
     container_name: camoufox-connector
     ports:
-      - "8080:8080"       # HTTP API
-      - "9222:9222"       # WebSocket endpoint
+      - "8080:8080"
+      - "9222:9222"
     environment:
       - CAMOUFOX_MODE=single
       - CAMOUFOX_HEADLESS=true
       - CAMOUFOX_GEOIP=true
       - CAMOUFOX_HUMANIZE=true
+      - CAMOUFOX_MCP_STATE_DIR=/var/lib/camoufox-connector/mcp-state
     restart: unless-stopped
+    volumes:
+      - mcp-state:/var/lib/camoufox-connector/mcp-state
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-    # Shared memory size (required for browsers)
     shm_size: 2gb
-    # Do not mount over /root/.cache/camoufox — an empty volume hides
-    # browser binaries pre-fetched into the image by `camoufox fetch`.
 
-  # Pool mode with multiple browser instances
-  # NOTE: WebSocket ports are dynamically assigned by camoufox.
-  # On Linux: use network_mode: host for full port access
-  # On Windows/Mac: run natively or use Linux VM
   camoufox-pool:
     build: .
     container_name: camoufox-connector-pool
-    profiles:
-      - pool
-    # Use host network for dynamic WebSocket port access
-    # Required because camoufox assigns random ports that can't be predicted
+    profiles: [pool]
     network_mode: host
     environment:
       - CAMOUFOX_MODE=pool
@@ -48,27 +34,16 @@ services:
       - CAMOUFOX_HEADLESS=true
       - CAMOUFOX_GEOIP=true
       - CAMOUFOX_HUMANIZE=true
+      - CAMOUFOX_MCP_STATE_DIR=/var/lib/camoufox-connector/mcp-state
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-      start_period: 60s
-    # More shared memory for multiple browsers
+    volumes:
+      - mcp-state:/var/lib/camoufox-connector/mcp-state
     shm_size: 4gb
-    deploy:
-      resources:
-        limits:
-          cpus: '4'
-          memory: 8G
 
-  # Pool mode with proxy
   camoufox-proxy:
     build: .
     container_name: camoufox-connector-proxy
-    profiles:
-      - proxy
+    profiles: [proxy]
     ports:
       - "8080:8080"
       - "9222-9230:9222-9230"
@@ -77,8 +52,14 @@ services:
       - CAMOUFOX_POOL_SIZE=3
       - CAMOUFOX_HEADLESS=true
       - CAMOUFOX_PROXY=${PROXY_URL:-}
+      - CAMOUFOX_MCP_STATE_DIR=/var/lib/camoufox-connector/mcp-state
     restart: unless-stopped
+    volumes:
+      - mcp-state:/var/lib/camoufox-connector/mcp-state
     shm_size: 4gb
+
+volumes:
+  mcp-state:
 
 networks:
   default:

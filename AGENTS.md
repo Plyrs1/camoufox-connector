@@ -70,6 +70,7 @@ Client (Node.js/Go/Python/Java/etc.)
 │   ├── server.py                  # CLI entry point, signal handling, orchestration
 │   ├── pool.py                    # BrowserPool, BrowserInstance, port tracking
 │   ├── launcher.py                # Subprocess launcher, Node.js process group mgmt
+│   ├── mcp.py                     # Persistent browser-control MCP server
 │   └── health.py                  # Starlette HTTP API endpoints
 ├── tests/                         # Test suite (pytest)
 │   ├── test_integration.py        # Full lifecycle integration tests (requires browser)
@@ -107,6 +108,7 @@ Client (Node.js/Go/Python/Java/etc.)
 | JSON Serialization | orjson (used in launcher.py for speed) |
 | HTTP Client | httpx (>=0.26.0) |
 | WebSocket Client | websockets (>=12.0) |
+| Browser Control API | MCP Python SDK (>=1.9.0,<2.0.0), Streamable HTTP |
 | Dev Tools | pytest, pytest-asyncio, black, ruff |
 
 ---
@@ -159,7 +161,14 @@ Client (Node.js/Go/Python/Java/etc.)
 
 - Runs on `api_host:api_port` (default `0.0.0.0:8080`)
 
-### 5.5 `server.py` — Main Entry Point
+### 5.5 `mcp.py` — Embedded MCP API
+
+- Optional Streamable HTTP transport mounted at `/mcp` (not `/mcp/mcp`). DNS-rebinding protection permits localhost/127.0.0.1 by default; `mcp_host` / `CAMOUFOX_MCP_HOST` configures the external hostname/IP (optionally with port) and its Origin allowlist.
+- Persistent explicit browser session IDs pin a healthy pool instance and retain browser/context/page.
+- Tools: `create_session`, `close_session`, `navigate`, `snapshot`, `click`, `fill`, `evaluate`, `screenshot`, `tabs`, `new_tab`, `select_tab`, `close_tab`, keyboard/mouse actions, and opaque-ID persistent state backup tools.
+- Sessions release their lease on explicit close, unhealthy instance, cleanup, or the default 1800-second idle timeout; leased instances cannot be restarted. State backups are UTF-8 JSON limited to 10 MiB, use opaque IDs, and restore origin storage without changing the active tab set.
+
+### 5.6 `server.py` — Main Entry Point
 
 - Parses CLI args via `argparse`
 - Builds `Settings` from CLI + env + JSON config
@@ -189,6 +198,10 @@ All config uses `CAMOUFOX_` prefix. See `.env.example` for a template.
 | `CAMOUFOX_HUMANIZE` | `true` | Humanization features |
 | `CAMOUFOX_BLOCK_IMAGES` | `false` | Block images for faster loads |
 | `CAMOUFOX_PROXY` | *(none)* | Proxy URL (`http://user:pass@host:port`) |
+| `CAMOUFOX_MCP_ENABLED` | `false` | Enable embedded MCP Streamable HTTP API |
+| `CAMOUFOX_MCP_PATH` | `/mcp` | MCP HTTP mount path |
+| `CAMOUFOX_MCP_SESSION_TIMEOUT` | `1800` | Idle browser-session expiry in seconds |
+| `CAMOUFOX_MCP_STATE_DIR` | `.camoufox-connector/mcp-state` | Persistent server-side state backup directory |
 | `CAMOUFOX_DEBUG` | `false` | Enable debug logging |
 
 ### 6.2 CLI Arguments
@@ -266,8 +279,6 @@ docker compose --profile pool up
 # Proxy mode
 docker compose --profile proxy up
 ```
-
----
 
 ## 8. Testing
 

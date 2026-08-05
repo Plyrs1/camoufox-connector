@@ -14,7 +14,7 @@ import websockets
 from starlette.applications import Starlette
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
-from starlette.routing import Route, WebSocketRoute
+from starlette.routing import Mount, Route, WebSocketRoute
 from starlette.websockets import WebSocket
 
 if TYPE_CHECKING:
@@ -223,11 +223,29 @@ def create_health_app(pool: BrowserPool) -> Starlette:
         Route("/restart/{index:int}", restart_instance, methods=["POST"]),
     ]
 
-    app = Starlette(
-        debug=pool.settings.debug,
-        routes=routes,
-    )
+    if pool.settings.mcp_enabled:
+        from .mcp import create_mcp
+        mcp, manager = create_mcp(
+            pool,
+            pool.settings.mcp_session_timeout,
+            pool.settings.mcp_state_dir,
+            pool.settings.mcp_host,
+        )
+        routes.append(Mount(pool.settings.mcp_path, app=mcp.streamable_http_app()))
 
+        from contextlib import asynccontextmanager
+        @asynccontextmanager
+        async def lifespan(app):
+            try:
+                async with mcp.session_manager.run():
+                    await manager.start()
+                    yield
+            finally:
+                await manager.cleanup()
+    else:
+        lifespan = None
+
+    app = Starlette(debug=pool.settings.debug, routes=routes, lifespan=lifespan)
     return app
 
 

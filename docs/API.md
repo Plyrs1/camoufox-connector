@@ -198,6 +198,35 @@ curl http://localhost:8080/stats
 curl -X POST http://localhost:8080/restart/0
 ```
 
+## MCP Browser Control API
+
+The optional MCP server is enabled with `CAMOUFOX_MCP_ENABLED=true` and uses Streamable HTTP at exactly `http://localhost:8080/mcp` by default. Configure an MCP client with `{"url":"http://localhost:8080/mcp"}`; `/mcp/mcp` is not the endpoint.
+
+The MCP transport session (managed by the MCP protocol) is distinct from the explicit browser `session_id` returned by `create_session`. Call `create_session`, pass that ID to browser tools, and call `close_session` when finished. The explicit session pins one pool instance and retains its browser, context, and active page.
+
+Tools: `create_session`, `close_session`, `navigate`, `snapshot`, `click`, `fill`, `evaluate`, `screenshot`, `tabs`, `new_tab`, `select_tab`, `close_tab`.
+
+Sessions expire after 1800 seconds of inactivity by default, even without another API call, and release their pool lease. A leased instance is excluded from allocation and cannot be restarted; when all instances are leased, creation fails until a session is closed or expires.
+
+| Setting | Default | Meaning |
+|---|---:|---|
+| `CAMOUFOX_MCP_ENABLED` | `false` | Enable the embedded MCP API |
+| `CAMOUFOX_MCP_PATH` | `/mcp` | Streamable HTTP mount path |
+| `CAMOUFOX_MCP_HOST` | *(unset; localhost only)* | External MCP Host hostname/IP, optionally with port; e.g. `10.10.0.11:53000`. Localhost and loopback defaults remain allowed. A host without a port uses the API port; `:*` explicitly allows any port. |
+| `CAMOUFOX_MCP_STATE_DIR` | `.camoufox-connector/mcp-state` | Persistent server-side MCP state backups |
+
+MCP browser sessions support keyboard and mouse actions. State backups are addressed by opaque IDs and store cookies plus origin storage server-side; listing returns metadata only. Docker deployments should persist `/var/lib/camoufox-connector/mcp-state`.
+| `CAMOUFOX_MCP_SESSION_TIMEOUT` | `1800` | Idle explicit browser-session timeout in seconds |
+
+Typical workflow:
+
+```text
+create_session
+  -> navigate(session_id, url)
+  -> snapshot/click/fill/evaluate/screenshot/tabs/new_tab/select_tab/close_tab
+  -> close_session(session_id)
+```
+
 ## HTTP API Reference
 
 The API accepts and returns JSON. Existing endpoints do not require request bodies.

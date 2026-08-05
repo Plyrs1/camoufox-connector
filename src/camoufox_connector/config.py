@@ -110,6 +110,21 @@ class Settings(BaseSettings):
         description="Proxy URL (http://user:pass@host:port)",
     )
 
+    # MCP configuration
+    mcp_enabled: bool = Field(default=False, description="Enable the embedded MCP server")
+    mcp_path: str = Field(default="/mcp", description="ASGI path for Streamable HTTP MCP")
+    mcp_host: Optional[str] = Field(
+        default=None,
+        description="Externally visible MCP Host header (hostname or IP, optionally with port)",
+    )
+    mcp_session_timeout: float = Field(
+        default=1800.0, ge=1.0, description="Idle MCP browser session timeout in seconds"
+    )
+    mcp_state_dir: Path = Field(
+        default=Path(".camoufox-connector/mcp-state"),
+        description="Directory for opaque MCP browser-state backups",
+    )
+
     # Debug settings
     debug: bool = Field(
         default=False,
