@@ -121,9 +121,11 @@ Client (Node.js/Go/Python/Java/etc.)
 - **`Settings`** (Pydantic BaseSettings):
   - All fields configurable via `CAMOUFOX_*` environment variables
   - Supports `.env` file, CLI args, and JSON config file (`--config`)
-  - Validates proxy URL format
-  - Auto-disables `geoip` if no proxy is configured (with warning)
-  - `to_camoufox_kwargs()` converts settings to camoufox launch parameters
+- Validates one or more comma-separated proxy URLs (`http://`, `https://`, `socks5://`); parses each with `urllib.parse.urlsplit`, percent-decodes credentials, and rejects malformed URLs, missing hostnames, unsupported schemes, partial credentials, and invalid ports. Commas inside credentials are unsupported and documented
+- Converts proxy URLs into the `{'server': ..., 'username': ..., 'password': ...}` mapping expected by Camoufox ≥ 0.5.x `launch_options` (string proxies raise a TypeError there)
+- Assigns proxies deterministically by browser instance index, cycling when `pool_size` exceeds the proxy count; a single proxy applies to all instances
+- Auto-disables `geoip` if no proxy is configured (with warning)
+  - `to_camoufox_kwargs(port=..., index=...)` converts settings to camoufox launch parameters, passing the per-instance proxy mapping selected deterministically by `index`
 
 ### 5.2 `pool.py` — Browser Pool
 
@@ -202,7 +204,7 @@ All config uses `CAMOUFOX_` prefix. See `.env.example` for a template.
 | `CAMOUFOX_GEOIP` | `true` | GeoIP spoofing (requires proxy) |
 | `CAMOUFOX_HUMANIZE` | `true` | Humanization features |
 | `CAMOUFOX_BLOCK_IMAGES` | `false` | Block images for faster loads |
-| `CAMOUFOX_PROXY` | *(none)* | Proxy URL (`http://user:pass@host:port`) |
+| `CAMOUFOX_PROXY` | *(none)* | One or more comma-separated proxy URLs (`http://`, `https://`, `socks5://user:pass@host:port`); assigned to browser instances by index, cycling when the pool exceeds the proxy count. Commas inside credentials are unsupported |
 | `CAMOUFOX_MCP_ENABLED` | `false` | Enable embedded MCP Streamable HTTP API |
 | `CAMOUFOX_MCP_PATH` | `/mcp` | MCP HTTP mount path |
 | `CAMOUFOX_MCP_SESSION_TIMEOUT` | `1800` | Idle browser-session expiry in seconds |

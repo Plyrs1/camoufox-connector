@@ -82,11 +82,20 @@ Use pool mode when you want fingerprint rotation across browser instances.
 camoufox-connector --proxy http://user:pass@host:port
 ```
 
+Pass **one or more comma-separated proxy URLs** to rotate proxies across pool instances. Proxies are assigned deterministically by browser instance index and cycle when the pool size exceeds the proxy count; a single proxy applies to all instances:
+
+```bash
+camoufox-connector --mode pool --pool-size 4 \
+  --proxy http://p1.example:8080,http://p2.example:8080
+```
+
 Supported proxy URL prefixes are:
 
 - `http://`
 - `https://`
 - `socks5://`
+
+Each URL may include percent-encoded credentials (`http://user%40name:p%40ss@host:port`); they are decoded and passed to Camoufox as a `{'server': ..., 'username': ..., 'password': ...}` mapping. Malformed URLs, missing hostnames, unsupported schemes, credentials missing either the username or the password, and invalid ports are rejected at startup. Commas inside credentials are not supported — percent-encode the comma or omit the credential.
 
 GeoIP spoofing requires a proxy. If `geoip` is enabled but no proxy is configured, the connector disables GeoIP automatically at startup.
 
@@ -106,6 +115,8 @@ export CAMOUFOX_GEOIP=true
 export CAMOUFOX_HUMANIZE=true
 export CAMOUFOX_BLOCK_IMAGES=false
 export CAMOUFOX_PROXY=http://user:pass@host:port
+# Or multiple, cycled by instance index:
+# export CAMOUFOX_PROXY=http://p1.example:8080,http://p2.example:8080
 export CAMOUFOX_DEBUG=false
 
 camoufox-connector
@@ -625,5 +636,5 @@ docker compose --profile proxy up
 | `GET /next` returns `503` | No browser instance is healthy yet, startup failed, or all browsers exited. Check connector logs and `GET /health`. |
 | `geoip=True` warning | GeoIP requires a proxy. Set `CAMOUFOX_PROXY` or disable GeoIP with `CAMOUFOX_GEOIP=false` or `--no-geoip`. |
 | Cannot connect to WebSocket in Docker pool mode | Use Linux host networking or expose the required WebSocket port range. |
-| Proxy validation error | Proxy must start with `http://`, `https://`, or `socks5://`. |
+| Proxy validation error | One or more comma-separated proxy URLs must use `http://`, `https://`, or `socks5://`, include a hostname, and include both username and password when credentials are present. Commas inside credentials are not supported |
 | Session is not preserved | Use single mode or reuse the same endpoint from `GET /endpoints` instead of calling `GET /next` for every task. |

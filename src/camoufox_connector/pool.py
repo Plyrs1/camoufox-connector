@@ -179,7 +179,9 @@ class BrowserPool:
         try:
             logger.info(f"Starting browser instance {instance.index} on port {instance.port}")
 
-            kwargs = self.settings.to_camoufox_kwargs(port=instance.port)
+            kwargs = self.settings.to_camoufox_kwargs(
+                port=instance.port, index=instance.index
+            )
 
             # Reclaim port if a stale orphan process is still holding it.
             if not self._is_port_free(instance.port):

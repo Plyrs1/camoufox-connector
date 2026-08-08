@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import urllib.parse
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -19,6 +20,92 @@ from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 logger = logging.getLogger(__name__)
+
+_SUPPORTED_PROXY_SCHEMES = ("http", "https", "socks5")
+
+
+def parse_proxy_url(url: str) -> dict:
+    """Parse a proxy URL string into a mapping accepted by ``launch_options``.
+
+    Camoufox >= 0.5.x expects ``proxy`` to be a mapping (``{'server': ...,
+    'username': ..., 'password': ...}``) instead of a raw URL string; passing a
+    string raises a TypeError.  This helper produces that mapping.
+
+    - ``server`` keeps the scheme/hostname/port (credentials stripped)
+    - ``username``/``password`` are percent-decoded via ``urllib.parse.unquote``
+    - invalid or malformed URLs are rejected with a descriptive ``ValueError``
+
+    Args:
+        url: A proxy URL such as ``http://user:pass@host:8080``.
+
+    Returns:
+        A mapping consumed by ``camoufox.launch_options(proxy=...)``.
+
+    Raises:
+        ValueError: If the URL is malformed, uses an unsupported scheme, has no
+            hostname, has incomplete credentials, or has an invalid port.
+    """
+    if not isinstance(url, str) or not url.strip():
+        raise ValueError("Proxy URL must not be empty")
+    url = url.strip()
+
+    if "://" not in url:
+        raise ValueError(
+            f"Malformed proxy URL '{url}': missing scheme "
+            "(must be http://, https://, or socks5://)"
+        )
+
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError as exc:
+        raise ValueError(f"Malformed proxy URL '{url}': {exc}") from exc
+
+    scheme = parts.scheme.lower()
+    if scheme not in _SUPPORTED_PROXY_SCHEMES:
+        raise ValueError(
+            f"Unsupported proxy scheme '{parts.scheme}'; "
+            "must be http://, https://, or socks5://"
+        )
+    if not parts.hostname:
+        raise ValueError(f"Proxy URL '{url}' is missing a hostname")
+
+    try:
+        port = parts.port
+    except ValueError as exc:
+        raise ValueError(f"Proxy URL '{url}' has an invalid port: {exc}") from exc
+
+    host = parts.hostname
+    if ":" in host:  # IPv6 literals must be re-bracketed for the server field
+        host = f"[{host}]"
+    server = f"{scheme}://{host}"
+    if port is not None:
+        server += f":{port}"
+
+    mapping = {"server": server}
+
+    username = parts.username
+    password = parts.password
+    if username is None and password is None:
+        return mapping
+    if not username or not password:  # None or empty after urlsplit decoding
+        raise ValueError(
+            f"Proxy URL '{url}' credentials must include both username and password"
+        )
+    if "," in username or "," in password:
+        raise ValueError(
+            "Commas inside proxy credentials are not supported; "
+            "percent-encode the comma (e.g. %2C) or omit the credential"
+        )
+    mapping["username"] = urllib.parse.unquote(username)
+    mapping["password"] = urllib.parse.unquote(password)
+    return mapping
+
+
+def parse_proxy_list(value: Optional[str]) -> list:
+    """Parse one or more comma-separated proxy URLs into launch mappings."""
+    if value is None or value == "":
+        return []
+    return [parse_proxy_url(item) for item in value.split(",")]
 
 
 class ServerMode(str, Enum):
@@ -127,7 +214,14 @@ class Settings(BaseSettings):
     # Proxy configuration
     proxy: Optional[str] = Field(
         default=None,
-        description="Proxy URL (http://user:pass@host:port)",
+        description=(
+            "One or more comma-separated proxy URLs "
+            "(http://, https://, or socks5://user:pass@host:port). "
+            "Commas inside credentials are not supported. Each configured "
+            "proxy is assigned to browser instances deterministically by "
+            "instance index (cycling when the pool is larger than the proxy "
+            "list); a single proxy applies to all instances."
+        ),
     )
 
     # MCP configuration
@@ -154,12 +248,11 @@ class Settings(BaseSettings):
     @field_validator("proxy")
     @classmethod
     def validate_proxy(cls, v: Optional[str]) -> Optional[str]:
-        """Validate proxy URL format."""
+        """Validate one or more comma-separated proxy URLs."""
         if v is None or v == "":
             return None
-        # Basic validation - should start with http:// or https://
-        if not v.startswith(("http://", "https://", "socks5://")):
-            raise ValueError("Proxy must start with http://, https://, or socks5://")
+        # Raises ValueError with a descriptive message for invalid entries.
+        parse_proxy_list(v)
         return v
 
     @field_validator("public_ws_url")
@@ -213,17 +306,46 @@ class Settings(BaseSettings):
         """Get WebSocket port for a given browser instance index."""
         return self.ws_port_start + index
 
-    def to_camoufox_kwargs(self, port: int = None) -> dict:
-        """Convert settings to kwargs for camoufox launch_server."""
-        kwargs = {
+    def proxy_mappings(self) -> list:
+        """Launch mappings for every configured proxy URL, in order.
+
+        Returns an empty list when no proxy is configured.
+        """
+        return parse_proxy_list(self.proxy)
+
+    def proxy_mapping(self, index: int = 0) -> Optional[dict]:
+        """Get the proxy mapping assigned to the browser instance *index*.
+
+        Proxies are assigned deterministically by instance index, cycling
+        when the pool size exceeds the number of configured proxies.  A
+        single proxy applies to every instance.
+
+        Returns:
+            The launch mapping for the instance, or ``None`` when no proxy is
+            configured.
+        """
+        mappings = self.proxy_mappings()
+        if not mappings:
+            return None
+        return mappings[index % len(mappings)]
+
+    def to_camoufox_kwargs(self, port: Optional[int] = None, index: int = 0) -> dict:
+        """Convert settings to kwargs for camoufox launch_server.
+
+        ``proxy`` is passed as the mapping expected by Camoufox 0.5.x
+        (``{'server': ..., 'username': ..., 'password': ...}``); the instance
+        ``index`` selects which configured proxy applies (cycling).
+        """
+        kwargs: dict = {
             "headless": self.headless,
             "geoip": self.geoip,
             "humanize": self.humanize,
             "block_images": self.block_images,
         }
 
-        if self.proxy:
-            kwargs["proxy"] = self.proxy
+        proxy = self.proxy_mapping(index)
+        if proxy is not None:
+            kwargs["proxy"] = proxy
 
         if port is not None:
             kwargs["port"] = port

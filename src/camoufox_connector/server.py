@@ -40,8 +40,9 @@ Examples:
   # Start with 5 browser instances
   camoufox-connector --mode pool --pool-size 5
 
-  # Start with proxy
+  # Start with a proxy (comma-separate for multiple; cycled by instance index)
   camoufox-connector --proxy http://user:pass@host:port
+  camoufox-connector --mode pool --pool-size 4 --proxy http://p1.example:8080,http://p2.example:8080
 
   # Start with custom ports
   camoufox-connector --api-port 3000 --ws-port-start 9000
@@ -157,8 +158,13 @@ Environment variables:
         "--proxy",
         type=str,
         default=None,
-        metavar="URL",
-        help="Proxy URL (http://user:pass@host:port)",
+        metavar="URL[,URL...]",
+        help=(
+            "One or more comma-separated proxy URLs "
+            "(http://, https://, or socks5://user:pass@host:port); proxies are "
+            "assigned to browser instances by index, cycling when the pool is "
+            "larger than the proxy list"
+        ),
     )
 
     # Configuration file
