@@ -55,11 +55,25 @@ def test_next_returns_proxy_endpoint_and_browser_status():
     assert data["lease_id"] == "stable-token-0"
     assert data["browser"] == {
         "index": 0,
-        "status": "idle",
+        "status": "busy",
         "healthy": True,
         "connections": 0,
         "total_connections": 0,
     }
+    assert pool.instances[0].leased is True
+
+
+def test_next_skips_instance_with_active_connections():
+    pool = _pool_with_instances(count=2)
+    pool.instances[0].connections = 1
+    app = create_health_app(pool)
+
+    with TestClient(app) as client:
+        response = client.get("/next")
+
+    assert response.status_code == 200
+    assert response.json()["browser"]["index"] == 1
+    assert response.json()["browser"]["status"] == "busy"
 
 
 def test_next_reserves_second_call_503_until_release():

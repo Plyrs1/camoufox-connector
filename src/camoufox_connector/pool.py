@@ -57,7 +57,7 @@ class BrowserInstance:
             return "inactive"
         if not self.is_healthy:
             return "error"
-        if self.connections > 0:
+        if self.leased or self.connections > 0:
             return "busy"
         return "idle"
 
@@ -637,6 +637,7 @@ class BrowserPool:
                 instance.is_healthy
                 and not instance.leased
                 and not instance.restarting
+                and instance.connections == 0
                 and instance.ws_endpoint
                 and instance.proxy_endpoint
             ):
