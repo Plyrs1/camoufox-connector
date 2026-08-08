@@ -48,7 +48,7 @@ ENV NOVNC_PORT=6080
 # Set working directory
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies (layer cached until requirements.txt changes)
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements.txt
@@ -58,10 +58,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     camoufox fetch
 
-# Install the application
+# Install the package metadata first (layer cached until pyproject.toml changes)
+COPY pyproject.toml .
+COPY src/camoufox_connector/__init__.py src/camoufox_connector/__init__.py
+
+# Copy application source and install
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install -e .
+    uv pip install -e . --no-deps
 RUN chmod +x start.sh
 
 # Expose ports
