@@ -178,6 +178,15 @@ Environment variables:
     parser.add_argument("--mcp-session-timeout", type=float, default=None, help="MCP idle timeout in seconds (default: 1800)")
     parser.add_argument("--mcp-state-dir", default=None, help="Directory for MCP state backups")
 
+    # Lease configuration
+    parser.add_argument(
+        "--lease-timeout",
+        type=float,
+        default=None,
+        metavar="SECONDS",
+        help="Browser lease duration for /next and MCP allocations (default: 1800)",
+    )
+
     # Debug
     parser.add_argument(
         "--debug",
@@ -242,10 +251,11 @@ class Server:
         lines.append("  API Routes:")
         lines.append("    GET  /         - Server info")
         lines.append("    GET  /health   - Health check")
-        lines.append("    GET  /next     - Get next browser (round-robin)")
+        lines.append("    GET  /next     - Get next browser (round-robin, acquires a lease)")
         lines.append("    GET  /endpoints - List all endpoints")
         lines.append("    GET  /stats    - Pool statistics")
         lines.append("    POST /restart/{n} - Restart instance N")
+        lines.append("    POST /release/{lease_id} - Release a browser lease")
         lines.append("")
         lines.append("=" * 60)
         lines.append("")

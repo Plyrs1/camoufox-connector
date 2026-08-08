@@ -70,19 +70,22 @@ def create_health_app(pool: BrowserPool) -> Starlette:
         """
         Get the next available proxied endpoint using round-robin.
 
-        This is the primary endpoint for clients to get a browser.
+        Atomically reserves a healthy browser instance keyed by its stable
+        proxy token; if none is available, a single guarded restart of an
+        intentionally stopped slot is awaited before returning. Clients may
+        open multiple WebSocket connections to the returned token and release
+        it explicitly with POST /release/{token}.
         """
-        instance = await pool.get_next_instance()
-
+        instance = await pool.reserve_next_instance()
         if instance is None or instance.proxy_endpoint is None:
             return JSONResponse(
                 {"error": "No healthy browser instances available"},
                 status_code=503,
             )
-
         return JSONResponse({
             "endpoint": instance.proxy_endpoint,
             "proxy_endpoint": instance.proxy_endpoint,
+            "lease_id": instance.proxy_token,
             "browser": {
                 "index": instance.index,
                 "status": instance.status,
@@ -90,6 +93,24 @@ def create_health_app(pool: BrowserPool) -> Starlette:
                 "connections": instance.connections,
                 "total_connections": instance.total_connections,
             },
+        })
+
+    async def release_lease(request: Request) -> Response:
+        """
+        Release a browser reservation by its proxy token.
+
+        POST /release/{token}
+        Returns 200 on a live reservation; 404 for invalid tokens.
+        """
+        lease_id = request.path_params.get("lease_id")
+        if not lease_id or not await pool.release_lease(str(lease_id)):
+            return JSONResponse(
+                {"error": "Invalid or expired lease"},
+                status_code=404,
+            )
+        return JSONResponse({
+            "status": "released",
+            "lease_id": lease_id,
         })
 
     async def stats(request: Request) -> Response:
@@ -169,9 +190,8 @@ def create_health_app(pool: BrowserPool) -> Starlette:
         try:
             upstream = await websockets.connect(instance.ws_endpoint)
             await websocket.accept()
-            instance.connections += 1
-            instance.total_connections += 1
             counted_connection = True
+            await pool.on_websocket_connected(str(token))
 
             async def client_to_browser() -> None:
                 while True:
@@ -209,8 +229,10 @@ def create_health_app(pool: BrowserPool) -> Starlette:
             except RuntimeError:
                 pass
         finally:
-            if counted_connection and instance.connections > 0:
-                instance.connections -= 1
+            # The pool's disconnect handling decrements the connection count
+            # and triggers the grace/stop lifecycle on the last disconnect.
+            if counted_connection:
+                await pool.on_websocket_disconnected(str(token))
             if upstream is not None:
                 await upstream.close()
 
@@ -219,6 +241,7 @@ def create_health_app(pool: BrowserPool) -> Starlette:
         Route("/health", health, methods=["GET"]),
         Route("/endpoints", endpoints, methods=["GET"]),
         Route("/next", next_endpoint, methods=["GET"]),
+        Route("/release/{lease_id}", release_lease, methods=["POST"]),
         WebSocketRoute("/ws/{token}", websocket_proxy),
         Route("/stats", stats, methods=["GET"]),
         Route("/restart/{index:int}", restart_instance, methods=["POST"]),

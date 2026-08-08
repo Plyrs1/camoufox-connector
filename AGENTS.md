@@ -132,6 +132,7 @@ Client (Node.js/Go/Python/Java/etc.)
   - `start()`: spawns all instances concurrently
   - `stop()`: graceful shutdown with SIGTERM → SIGKILL cascade
   - `get_next_endpoint()`: round-robin across healthy instances (async-safe with lock)
+  - `acquire_lease()` / `release_lease()`: shared opaque, expiring reservations used by `/next` and MCP; leased instances are excluded from allocation and restart
   - `restart_instance(index)`: stop + start a specific instance; manual and health-triggered restarts share a per-instance task so overlapping requests are serialized
   - `health_check()`: checks process liveness; auto-restarts unexpectedly dead *unleased* instances while skipping leased ones
   - Failed endpoint startup cleans up the launcher and any remaining port-owning process before a retry
@@ -155,7 +156,8 @@ Client (Node.js/Go/Python/Java/etc.)
 |----------|--------|-------------|
 | `/` | GET | Server info (name, version, mode, config) |
 | `/health` | GET | Health check. 200 if >=1 healthy instance, 503 otherwise |
-| `/next` | GET | Round-robin proxied browser WebSocket endpoint |
+| `/next` | GET | Acquire an expiring lease and return a round-robin proxied browser WebSocket endpoint |
+| `/release/{lease_id}` | POST | Release a `/next` or other pool lease |
 | `/ws/{token}` | WebSocket | Proxy Playwright traffic to the mapped browser instance |
 | `/endpoints` | GET | List all healthy proxied endpoints with browser status |
 | `/stats` | GET | Pool stats: connections, uptime, per-instance details |
@@ -195,6 +197,7 @@ All config uses `CAMOUFOX_` prefix. See `.env.example` for a template.
 | `CAMOUFOX_API_HOST` | `0.0.0.0` | HTTP API bind host |
 | `CAMOUFOX_WS_PORT_START` | `9222` | Starting internal browser WebSocket port (1024–65500) |
 | `CAMOUFOX_PUBLIC_WS_URL` | `ws://localhost:8080` | Public WebSocket base URL returned by `/next` and `/endpoints` |
+| `CAMOUFOX_LEASE_TIMEOUT` | `1800` | Reservation duration in seconds for `/next` and MCP leases |
 | `CAMOUFOX_HEADLESS` | `true` | Headless mode |
 | `CAMOUFOX_GEOIP` | `true` | GeoIP spoofing (requires proxy) |
 | `CAMOUFOX_HUMANIZE` | `true` | Humanization features |

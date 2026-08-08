@@ -83,6 +83,26 @@ class Settings(BaseSettings):
         description="Public WebSocket base URL for proxied browser endpoints",
     )
 
+    # Browser lifecycle configuration
+    connection_timeout: float = Field(
+        default=300.0,
+        ge=0.0,
+        description=(
+            "Seconds after a /next reservation with zero WebSocket connections it "
+            "expires and the instance becomes allocatable again; cleared by the "
+            "first successful WebSocket connection (0 = expire immediately)"
+        ),
+    )
+    browser_grace_period: float = Field(
+        default=0.0,
+        ge=0.0,
+        description=(
+            "Grace period in seconds before an instance is stopped after its last "
+            "WebSocket disconnect (0 = stop immediately); pending stops are "
+            "cancelled by a reconnection"
+        ),
+    )
+
     # Browser configuration
     headless: bool = Field(
         default=True,

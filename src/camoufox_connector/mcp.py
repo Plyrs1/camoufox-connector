@@ -27,6 +27,7 @@ from .pool import BrowserInstance, BrowserPool
 @dataclass
 class BrowserSession:
     id: str
+    lease_id: str
     instance: BrowserInstance
     browser: Browser
     context: BrowserContext
@@ -74,8 +75,13 @@ class BrowserSessionManager:
             return
 
     async def create(self) -> BrowserSession:
-        instance = await self.pool.lease_next_instance()
-        if instance is None or not instance.ws_endpoint:
+        acquired = await self.pool.acquire_lease(timeout=self.timeout)
+        if acquired is None:
+            raise RuntimeError("No healthy browser instance is available")
+        lease_id, instance = acquired
+        if not instance.ws_endpoint:
+            # Defensive: the pool should never hand out an endpoint-less instance.
+            await self.pool.release_lease(lease_id)
             raise RuntimeError("No healthy browser instance is available")
 
         async with self._lock:
@@ -88,6 +94,7 @@ class BrowserSessionManager:
                 page = await context.new_page()
                 session = BrowserSession(
                     uuid.uuid4().hex,
+                    lease_id,
                     instance,
                     browser,
                     context,
@@ -99,7 +106,7 @@ class BrowserSessionManager:
                 return session
             except Exception:
                 await self._close_resources(browser, context)
-                await self.pool.release_instance(instance)
+                await self.pool.release_lease(lease_id)
                 raise
 
     async def get(self, session_id: str) -> BrowserSession:
@@ -135,7 +142,7 @@ class BrowserSessionManager:
         self.sessions.pop(session.id, None)
         await self._close_resources(session.browser, session.context)
         try:
-            await self.pool.release_instance(session.instance)
+            await self.pool.release_lease(session.lease_id)
         except Exception:
             pass
 

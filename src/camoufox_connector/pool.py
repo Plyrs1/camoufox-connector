@@ -42,7 +42,13 @@ class BrowserInstance:
     total_connections: int = 0
     is_healthy: bool = False
     leased: bool = False
+    owner: Optional[str] = None
+    restarting: bool = False
     last_health_check: Optional[float] = None
+    # Lifecycle state: reservation timeout and idle-stop coordination.
+    reserved_at: Optional[float] = None
+    connection_deadline: Optional[float] = None
+    intentionally_stopped: bool = False
 
     @property
     def status(self) -> str:
@@ -75,7 +81,25 @@ class BrowserInstance:
             "total_connections": self.total_connections,
             "is_healthy": self.is_healthy,
             "leased": self.leased,
+            "owner": self.owner,
+            "intentionally_stopped": self.intentionally_stopped,
         }
+
+
+@dataclass
+class Lease:
+    """A pool reservation keyed by the instance's stable proxy token.
+
+    ``lease_id`` IS ``instance.proxy_token`` — there is no opaque token and
+    no expiry field. A reservation's lifetime is governed by
+    ``connection_timeout`` while it has zero WebSocket connections; the first
+    successful connection clears the deadline, after which it never expires
+    by timeout. Enforcement is lazy via
+    :meth:`BrowserPool._purge_stale_reservations_locked`.
+    """
+
+    lease_id: str  # == instance.proxy_token
+    instance: BrowserInstance
 
 
 @dataclass
@@ -86,7 +110,24 @@ class BrowserPool:
     Provides round-robin load balancing across browser instances,
     each with its own unique fingerprint.
 
-    # TODO(Windows): Process group signaling and port tracking are Linux/Unix-only.
+    The pool owns the reservation registry. Reservations are keyed by each
+    instance's stable ``proxy_token`` — the token returned by /next and used
+    by /ws/{token} is the reservation key, so no opaque ids are needed,
+    multiple clients may share one token, and explicit release by proxy
+    token works. A reserved instance is excluded from round-robin allocation
+    until its reservation is released, expires, or is invalidated by a
+    stop/restart.
+
+    Lifecycle: a fresh reservation holds a ``connection_timeout`` deadline
+    that applies only while it has zero WebSocket connections; the first
+    successful connection clears the deadline so a connected reservation
+    never expires by timeout. When the last WebSocket connection drops,
+    ``browser_grace_period`` (0 = immediate) triggers a guarded idle stop
+    (single task per instance) which a reconnection cancels. MCP-owned
+    instances (``owner == "mcp"``) are never idle-stopped. Intentionally
+    stopped instances stay registered and are restarted on demand by /next.
+
+    # TODO: Process-level grouping and port tracking are Linux/Unix-only.
     # For Windows support, evaluate:
     #   - subprocess.CREATE_NEW_PROCESS_GROUP for process groups
     #   - os.kill(pid, signal.CTRL_BREAK_EVENT) for signaling
@@ -99,6 +140,8 @@ class BrowserPool:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _running: bool = False
     _restart_tasks: dict[int, asyncio.Task[bool]] = field(default_factory=dict)
+    _idle_stop_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
+    _leases: dict[str, Lease] = field(default_factory=dict)
 
     async def start(self) -> None:
         """Start all browser instances in the pool."""
@@ -354,10 +397,22 @@ class BrowserPool:
 
         self.instances.clear()
         self._current_index = 0
+        self._leases.clear()
+        for task in self._idle_stop_tasks.values():
+            task.cancel()
+        self._idle_stop_tasks.clear()
         logger.info("Browser pool stopped")
 
-    async def _stop_instance(self, instance: BrowserInstance) -> None:
-        """Stop a single browser instance with orphan cleanup."""
+    async def _stop_instance(
+        self, instance: BrowserInstance, intentionally_stopped: bool = False
+    ) -> None:
+        """Stop a single browser instance with orphan cleanup.
+
+        ``intentionally_stopped=True`` marks the slot as an idle stop that
+        /next restarts on demand; ``False`` for restart/full-shutdown paths.
+        Stopping always invalidates the instance's token — any reservation
+        keyed on it is dropped so the stale proxy endpoint can never reopen.
+        """
         port = instance.port
         process = instance.process
 
@@ -394,11 +449,16 @@ class BrowserPool:
         except Exception as e:
             logger.error(f"Error stopping browser instance {instance.index}: {e}")
         finally:
+            async with self._lock:
+                self._drop_reservations_for_instance_locked(instance)
             instance.process = None
             instance.is_healthy = False
             instance.ws_endpoint = None
             instance.proxy_token = None
             instance.proxy_endpoint = None
+            instance.reserved_at = None
+            instance.connection_deadline = None
+            instance.intentionally_stopped = intentionally_stopped
 
     def _build_proxy_endpoint(self, token: str) -> str:
         """Build the public proxy WebSocket endpoint for a token."""
@@ -414,18 +474,156 @@ class BrowserPool:
         async with self._lock:
             return await self._get_next_instance_locked()
 
-    async def lease_next_instance(self) -> Optional[BrowserInstance]:
-        """Atomically select and reserve the next healthy instance."""
+    # ------------------------------------------------------------------
+    # Reservations — keyed by the instance's stable proxy token.
+    # ------------------------------------------------------------------
+
+    def _clear_reservation_flags_locked(self, instance: BrowserInstance) -> None:
+        """Reset an instance's reservation fields. Call with the lock held."""
+        instance.leased = False
+        instance.owner = None
+        instance.reserved_at = None
+        instance.connection_deadline = None
+
+    def _mark_reserved_locked(self, instance: BrowserInstance, owner: str) -> None:
+        """Reserve a healthy instance under its stable proxy token."""
+        token = instance.proxy_token
+        if not token:
+            raise RuntimeError(f"Cannot reserve endpoint-less instance {instance.index}")
+        instance.leased = True
+        instance.owner = owner
+        instance.reserved_at = time.monotonic()
+        if owner == "mcp":
+            # MCP sessions manage their own idle expiry; the pool must never
+            # reap or grace-stop an MCP-owned instance (its connections bypass
+            # the proxy connection counter).
+            instance.connection_deadline = None
+        else:
+            instance.connection_deadline = time.monotonic() + max(
+                self.settings.connection_timeout, 0.0
+            )
+        self._leases[token] = Lease(token, instance)
+
+    def _drop_reservations_for_instance_locked(self, instance: BrowserInstance) -> None:
+        """Drop every reservation held on an instance (token invalidation).
+
+        Must be called while holding ``self._lock``.
+        """
+        for token, lease in list(self._leases.items()):
+            if lease.instance is instance:
+                self._leases.pop(token, None)
+        self._clear_reservation_flags_locked(instance)
+
+    def _purge_stale_reservations_locked(self) -> None:
+        """Drop unconnected reservations that outlived ``connection_timeout``.
+
+        A reservation only expires while it has zero WebSocket connections and
+        has not been pinned by a successful connection (its
+        ``connection_deadline`` is then cleared). Must be held under ``_lock``.
+        """
+        now = time.monotonic()
+        for token, lease in list(self._leases.items()):
+            instance = lease.instance
+            if (
+                instance.connections == 0
+                and instance.connection_deadline is not None
+                and instance.connection_deadline <= now
+            ):
+                self._leases.pop(token, None)
+                self._clear_reservation_flags_locked(instance)
+                logger.debug(
+                    f"Reservation {token} expired; browser instance {instance.index} is available again"
+                )
+
+    async def reserve_next_instance(self) -> Optional[BrowserInstance]:
+        """
+        Atomically reserve the next available healthy browser instance.
+
+        Reservations are stored under the instance's stable ``proxy_token``,
+        so ``/next`` hands out the token as the reservation key and multiple
+        clients may share it. If no healthy unreserved instance is available,
+        an intentionally stopped slot's single guarded restart is awaited
+        before returning (concurrent callers are serialized per instance).
+        """
+        while True:
+            async with self._lock:
+                self._purge_stale_reservations_locked()
+                instance = await self._get_next_instance_locked()
+                if instance is not None:
+                    self._mark_reserved_locked(instance, owner="next")
+                    self._cancel_idle_stop(instance)
+                    return instance
+                stopped = next(
+                    (
+                        inst
+                        for inst in self.instances
+                        if inst.intentionally_stopped and not inst.restarting
+                    ),
+                    None,
+                )
+            if stopped is None:
+                return None
+            task = self._schedule_restart(stopped)
+            if not await task:
+                return None
+
+    async def acquire_lease(
+        self, timeout: Optional[float] = None, owner: str = "next"
+    ) -> Optional[tuple[str, BrowserInstance]]:
+        """
+        Reserve the next available healthy instance, keyed by its proxy token.
+
+        ``timeout`` is accepted for backward compatibility and ignored: a
+        reservation's lifetime is governed by ``settings.connection_timeout``
+        (and cleared entirely once the first WebSocket connects). Service
+        integrations owning the browser directly (MCP) must pass
+        ``owner="mcp"`` so the instance is never grace-stopped on idle and is
+        never reaped by the connection timeout.
+
+        Returns:
+            A ``(proxy_token, instance)`` pair, or ``None`` when no healthy,
+            unreserved instance is available.
+        """
         async with self._lock:
+            self._purge_stale_reservations_locked()
             instance = await self._get_next_instance_locked()
-            if instance is not None:
-                instance.leased = True
-            return instance
+            if instance is None:
+                return None
+            token = instance.proxy_token
+            if token is None:
+                return None
+            self._mark_reserved_locked(instance, owner=owner)
+            return token, instance
+
+    async def release_lease(self, token: str) -> bool:
+        """
+        Atomically release a reservation by its proxy token.
+
+        Returns:
+            ``True`` if the token was a live reservation and the instance was
+            released; ``False`` for unknown tokens.
+        """
+        async with self._lock:
+            lease = self._leases.pop(token, None)
+            if lease is None:
+                return False
+            self._clear_reservation_flags_locked(lease.instance)
+            logger.debug(f"Reservation {token} released from browser instance {lease.instance.index}")
+            return True
+
+    async def lease_next_instance(self, owner: str = "next") -> Optional[BrowserInstance]:
+        """Compatibility wrapper: reserve an instance and return only the instance."""
+        acquired = await self.acquire_lease(owner=owner)
+        return acquired[1] if acquired is not None else None
 
     async def release_instance(self, instance: BrowserInstance) -> None:
-        """Atomically release an instance reservation."""
+        """Compatibility wrapper: release whichever reservation the instance holds."""
         async with self._lock:
-            instance.leased = False
+            for token, lease in list(self._leases.items()):
+                if lease.instance is instance:
+                    self._leases.pop(token, None)
+                    self._clear_reservation_flags_locked(instance)
+                    break
 
     async def _get_next_instance_locked(self) -> Optional[BrowserInstance]:
         if not self.instances:
@@ -433,7 +631,13 @@ class BrowserPool:
         for _ in range(len(self.instances)):
             instance = self.instances[self._current_index]
             self._current_index = (self._current_index + 1) % len(self.instances)
-            if instance.is_healthy and not instance.leased and instance.ws_endpoint and instance.proxy_endpoint:
+            if (
+                instance.is_healthy
+                and not instance.leased
+                and not instance.restarting
+                and instance.ws_endpoint
+                and instance.proxy_endpoint
+            ):
                 return instance
         return None
 
@@ -441,11 +645,99 @@ class BrowserPool:
         """
         Get the next available proxied WebSocket endpoint using round-robin.
 
+        The returned endpoint retains its instance's proxy token (the
+        reservation key), so explicit release is possible by token.
+
         Returns:
             Proxied WebSocket endpoint URL or None if no healthy instances are available.
         """
-        instance = await self.get_next_instance()
+        instance = await self.reserve_next_instance()
         return instance.proxy_endpoint if instance else None
+
+    # ------------------------------------------------------------------
+    # WebSocket connection lifecycle (used by the /ws/{token} proxy)
+    # ------------------------------------------------------------------
+
+    def _can_idle_stop(self, instance: BrowserInstance) -> bool:
+        """Whether an instance may be idle-stopped once all connections drop.
+
+        MCP browser connections attach directly to the internal browser
+        endpoint and bypass the proxy connection counter, so a zero count
+        does not mean the instance is unused.
+        """
+        return instance.owner != "mcp"
+
+    def _cancel_idle_stop(self, instance: BrowserInstance) -> None:
+        """Cancel a pending guarded idle stop (e.g. on reconnection)."""
+        task = self._idle_stop_tasks.pop(instance.index, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_idle_stop(self, instance: BrowserInstance, delay: float) -> None:
+        """(Re)schedule a single guarded idle stop for an instance.
+
+        Concurrent disconnects share the per-instance task; a reconnection
+        cancels it via :meth:`_cancel_idle_stop`.
+        """
+        existing = self._idle_stop_tasks.get(instance.index)
+        if existing is not None and not existing.done():
+            return
+        self._cancel_idle_stop(instance)  # drop any finished entry
+
+        async def _runner() -> None:
+            try:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                # Re-check: a reconnection may have arrived while we waited.
+                async with self._lock:
+                    if instance.connections > 0 or not self._can_idle_stop(instance):
+                        return
+                logger.info(
+                    "Idle stop of browser instance %s after %ss grace",
+                    instance.index,
+                    delay,
+                )
+                # Rare race: a reconnection can land between the re-check and
+                # the stop; the reconnecting client simply re-runs /next.
+                await self._stop_instance(instance, intentionally_stopped=True)
+            finally:
+                self._idle_stop_tasks.pop(instance.index, None)
+
+        self._idle_stop_tasks[instance.index] = asyncio.create_task(_runner())
+
+    async def on_websocket_connected(self, token: str) -> None:
+        """Register a successful proxied WebSocket connection for ``token``.
+
+        The first successful connection pins the reservation: its connection
+        deadline is cleared (never expires by timeout) and any pending
+        grace-period stop is cancelled.
+        """
+        async with self._lock:
+            instance = self.get_instance_by_proxy_token(token)
+            if instance is None:
+                return
+            instance.connections += 1
+            instance.total_connections += 1
+            instance.connection_deadline = None
+        self._cancel_idle_stop(instance)
+
+    async def on_websocket_disconnected(self, token: str) -> None:
+        """Handle a proxied WebSocket disconnect for ``token``.
+
+        On the last disconnect: ``browser_grace_period`` 0 stops the instance
+        immediately; a positive grace schedules a guarded stop that a
+        reconnection cancels. MCP-owned instances are never idle-stopped.
+        """
+        async with self._lock:
+            instance = self.get_instance_by_proxy_token(token)
+            if instance is None:
+                return
+            if instance.connections > 0:
+                instance.connections -= 1
+            if instance.connections > 0 or not self._can_idle_stop(instance):
+                return
+            delay = self.settings.browser_grace_period
+        self._schedule_idle_stop(instance, delay)
 
     def get_instance_by_proxy_token(self, token: str) -> Optional[BrowserInstance]:
         """Get a browser instance by its stable proxy token."""
@@ -492,12 +784,17 @@ class BrowserPool:
 
         instance = self.instances[index]
         async with self._lock:
+            # Stale (expired) reservations are cleaned before the leased check
+            # so an expired token never blocks (or leaks) a restart attempt.
+            self._purge_stale_reservations_locked()
             if instance.leased:
                 return False
             task = self._schedule_restart(instance)
         return await task
 
     async def _restart_instance_work(self, instance: BrowserInstance) -> bool:
+        self._cancel_idle_stop(instance)
+        instance.intentionally_stopped = False
         await self._stop_instance(instance)
 
         # Reset instance state
@@ -506,6 +803,7 @@ class BrowserPool:
         instance.proxy_endpoint = None
         instance.started_at = None
         instance.connections = 0
+        instance.total_connections = 0
         instance.is_healthy = False
 
         try:
@@ -520,10 +818,13 @@ class BrowserPool:
         if existing is not None and not existing.done():
             return existing
 
+        instance.restarting = True
+
         async def _runner() -> bool:
             try:
                 return await self._restart_instance_work(instance)
             finally:
+                instance.restarting = False
                 current = self._restart_tasks.get(instance.index)
                 if current is asyncio.current_task():
                     self._restart_tasks.pop(instance.index, None)
@@ -541,6 +842,12 @@ class BrowserPool:
 
         restart_tasks: list[Awaitable[bool]] = []
 
+        # Clean stale (expired, unconnected) reservations first so an expired
+        # token never leaves its instance reserved (blocking allocation and
+        # restart decisions).
+        async with self._lock:
+            self._purge_stale_reservations_locked()
+
         for instance in self.instances:
             instance.last_health_check = time.time()
 
@@ -553,15 +860,15 @@ class BrowserPool:
             if not is_alive and instance.is_healthy:
                 logger.warning(f"Browser instance {instance.index} died unexpectedly")
                 instance.is_healthy = False
-                if instance.leased:
-                    logger.warning(
-                        "Browser instance %s is leased; skipping auto-restart and keeping it unavailable",
-                        instance.index,
-                    )
-                else:
+                # An unexpected death invalidates any reservation on this
+                # instance: the token it held can never reopen the endpoint.
+                # Drop it under the same lock used by allocation so /next
+                # cannot pick up a dead instance in between, then restart the
+                # dead slot (single guarded task).
+                async with self._lock:
+                    self._drop_reservations_for_instance_locked(instance)
                     task = self._schedule_restart(instance)
-                    if task is not None:
-                        restart_tasks.append(task)
+                restart_tasks.append(task)
 
             results["instances"].append({
                 "index": instance.index,

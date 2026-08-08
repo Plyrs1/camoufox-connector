@@ -118,16 +118,23 @@ class FakePool:
             BrowserInstance(i, 9000 + i, "ws://browser", f"token-{i}", "ws://public", is_healthy=True)
             for i in range(count)
         ]
+        self._leases = {}
 
-    async def lease_next_instance(self):
+    async def acquire_lease(self, timeout=None):
         for instance in self.instances:
-            if not instance.leased and instance.is_healthy:
+            if not instance.leased and instance.is_healthy and instance.ws_endpoint:
                 instance.leased = True
-                return instance
+                lease_id = f"lease-{instance.index}-{len(self._leases)}"
+                self._leases[lease_id] = instance
+                return lease_id, instance
         return None
 
-    async def release_instance(self, instance):
+    async def release_lease(self, lease_id):
+        instance = self._leases.pop(lease_id, None)
+        if instance is None:
+            return False
         instance.leased = False
+        return True
 
     async def restart_instance(self, index):
         if self.instances[index].leased:
@@ -178,6 +185,37 @@ async def test_create_failure_releases_lease(monkeypatch):
     with pytest.raises(RuntimeError):
         await manager.create()
     assert not pool.instances[0].leased
+    await manager.cleanup()
+
+
+@pytest.mark.asyncio
+async def test_mcp_uses_shared_acquire_release_token(monkeypatch):
+    """MCP sessions must go through the pool's shared lease registry."""
+    playwright = FakePlaywright()
+    monkeypatch.setattr("camoufox_connector.mcp.async_playwright", lambda: AsyncPlaywrightFactory(playwright))
+    pool = BrowserPool(Settings(geoip=False, lease_timeout=60))
+    instance = BrowserInstance(
+        0, 9222, "ws://browser", "token-0", "ws://public", is_healthy=True
+    )
+    pool.instances.append(instance)
+    manager = BrowserSessionManager(pool, timeout=60)
+
+    session = await manager.create()
+    assert session.lease_id in pool._leases  # shared registry, not a second one
+    assert pool._leases[session.lease_id].instance is instance
+    assert instance.leased is True
+
+    # While the MCP session holds the lease the pool must not reallocate it.
+    assert await pool.acquire_lease() is None
+
+    assert await manager.close(session.id)
+    assert session.lease_id not in pool._leases
+    assert instance.leased is False
+
+    # The released instance is allocatable again through the shared API.
+    acquired = await pool.acquire_lease()
+    assert acquired is not None and acquired[1] is instance
+    assert await pool.release_lease(acquired[0])
     await manager.cleanup()
 
 
