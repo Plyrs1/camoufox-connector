@@ -133,7 +133,7 @@ Client (Node.js/Go/Python/Java/etc.)
 - **`BrowserPool`**:
   - `start()`: spawns all instances concurrently
   - `stop()`: graceful shutdown with SIGTERM → SIGKILL cascade
-  - `get_next_endpoint()`: round-robin across healthy, idle instances with no active connections (async-safe with lock)
+  - `get_next_endpoint()`: round-robin across healthy, idle instances with no active connections (async-safe with lock); if none are available, starts an inactive or intentionally stopped slot on demand before returning
   - `acquire_lease()` / `release_lease()`: shared opaque, expiring reservations used by `/next` and MCP; leased instances are excluded from allocation and restart; a reserved `/next` instance reports `busy` until released or its unconnected reservation timeout expires
   - `restart_instance(index)`: stop + start a specific instance; manual and health-triggered restarts share a per-instance task so overlapping requests are serialized
   - `health_check()`: checks process liveness; auto-restarts unexpectedly dead *unleased* instances while skipping leased ones

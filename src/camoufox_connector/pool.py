@@ -543,9 +543,9 @@ class BrowserPool:
 
         Reservations are stored under the instance's stable ``proxy_token``,
         so ``/next`` hands out the token as the reservation key and multiple
-        clients may share it. If no healthy unreserved instance is available,
-        an intentionally stopped slot's single guarded restart is awaited
-        before returning (concurrent callers are serialized per instance).
+        clients may share it.  If no healthy unreserved instance is available,
+        an inactive or intentionally stopped slot is started on demand before
+        returning (concurrent callers are serialized per instance).
         """
         while True:
             async with self._lock:
@@ -555,17 +555,22 @@ class BrowserPool:
                     self._mark_reserved_locked(instance, owner="next")
                     self._cancel_idle_stop(instance)
                     return instance
-                stopped = next(
+                # Look for a startable slot: intentionally stopped OR inactive
+                # (unhealthy, no process/endpoint), but not currently leased or
+                # mid-restart.
+                startable = next(
                     (
                         inst
                         for inst in self.instances
-                        if inst.intentionally_stopped and not inst.restarting
+                        if not inst.is_healthy
+                        and not inst.leased
+                        and not inst.restarting
                     ),
                     None,
                 )
-            if stopped is None:
+            if startable is None:
                 return None
-            task = self._schedule_restart(stopped)
+            task = self._schedule_restart(startable)
             if not await task:
                 return None
 
