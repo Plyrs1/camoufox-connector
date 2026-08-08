@@ -98,7 +98,7 @@ class BrowserPool:
     _current_index: int = 0
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _running: bool = False
-    _restart_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
+    _restart_tasks: dict[int, asyncio.Task[bool]] = field(default_factory=dict)
 
     async def start(self) -> None:
         """Start all browser instances in the pool."""
@@ -173,7 +173,9 @@ class BrowserPool:
 
         except Exception as e:
             logger.error(f"Failed to start browser instance {instance.index}: {e}")
-            instance.is_healthy = False
+            # Endpoint startup can fail after the launcher has spawned Node. Clean
+            # that process and any port-owning descendants before the next retry.
+            await self._stop_instance(instance)
             raise
 
     # ------------------------------------------------------------------
@@ -492,7 +494,8 @@ class BrowserPool:
         async with self._lock:
             if instance.leased:
                 return False
-        return await self._restart_instance_work(instance)
+            task = self._schedule_restart(instance)
+        return await task
 
     async def _restart_instance_work(self, instance: BrowserInstance) -> bool:
         await self._stop_instance(instance)
@@ -512,14 +515,14 @@ class BrowserPool:
             logger.error(f"Failed to restart instance {instance.index}: {e}")
             return False
 
-    def _schedule_restart(self, instance: BrowserInstance) -> Optional[asyncio.Task[None]]:
+    def _schedule_restart(self, instance: BrowserInstance) -> asyncio.Task[bool]:
         existing = self._restart_tasks.get(instance.index)
         if existing is not None and not existing.done():
-            return None
+            return existing
 
-        async def _runner() -> None:
+        async def _runner() -> bool:
             try:
-                await self._restart_instance_work(instance)
+                return await self._restart_instance_work(instance)
             finally:
                 current = self._restart_tasks.get(instance.index)
                 if current is asyncio.current_task():
@@ -536,7 +539,7 @@ class BrowserPool:
             "instances": [],
         }
 
-        restart_tasks: list[Awaitable[None]] = []
+        restart_tasks: list[Awaitable[bool]] = []
 
         for instance in self.instances:
             instance.last_health_check = time.time()

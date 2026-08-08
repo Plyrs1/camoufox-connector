@@ -4,7 +4,9 @@
 FROM python:3.11-slim-trixie AS base
 
 # Install system dependencies for browsers
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     gnupg \
@@ -49,7 +51,7 @@ WORKDIR /app
 # Install Python dependencies
 COPY requirements.txt .
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --no-cache-dir -r requirements.txt
+    uv pip install -r requirements.txt
 
 # Pre-download camoufox browser binaries to avoid runtime downloads
 # This prevents multiple pool instances from downloading simultaneously
@@ -59,7 +61,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Install the application
 COPY . .
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install --no-cache-dir -e .
+    uv pip install -e .
 RUN chmod +x start.sh
 
 # Expose ports

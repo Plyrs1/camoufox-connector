@@ -216,9 +216,9 @@ class TestHealthCheckAutoRestart:
             first = pool._schedule_restart(instance)
             second = pool._schedule_restart(instance)
             assert first is not None
-            assert second is None
+            assert second is first
             blocker.set_result(True)
-            await first
+            assert await first is True
 
 
 class TestFindPidsForInodes:

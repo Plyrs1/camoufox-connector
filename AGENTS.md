@@ -132,8 +132,9 @@ Client (Node.js/Go/Python/Java/etc.)
   - `start()`: spawns all instances concurrently
   - `stop()`: graceful shutdown with SIGTERM → SIGKILL cascade
   - `get_next_endpoint()`: round-robin across healthy instances (async-safe with lock)
-  - `restart_instance(index)`: stop + start a specific instance
+  - `restart_instance(index)`: stop + start a specific instance; manual and health-triggered restarts share a per-instance task so overlapping requests are serialized
   - `health_check()`: checks process liveness; auto-restarts unexpectedly dead *unleased* instances while skipping leased ones
+  - Failed endpoint startup cleans up the launcher and any remaining port-owning process before a retry
   - Port reclamation: scans `/proc/net/tcp` + `/proc/*/fd/` to find stale PIDs holding ports; re-runs after any stop regardless of launcher exit state
   - Per-instance restart guard prevents duplicate concurrent restart tasks
 
@@ -347,6 +348,7 @@ Integration tests use port range 59000+ to avoid collisions and have 120s timeou
 
 - **Package:** `camoufox-connector`
 - **Version:** `1.0.3` (defined in `src/camoufox_connector/__init__.py` and `pyproject.toml`)
+- **Display version:** `get_display_version()` resolves the current git tag (e.g. `v1.0.3-r6`); falls back to ``__version__`` plus the build date when git metadata is unavailable (e.g. Docker images without `.git/`)
 - **Author:** Scrappey
 - **License:** MIT
 - **Python:** >=3.9

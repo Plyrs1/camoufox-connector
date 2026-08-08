@@ -131,11 +131,12 @@ def create_health_app(pool: BrowserPool) -> Starlette:
         """
         Get server information and configuration.
         """
-        from . import __version__
+        from . import __version__, get_display_version
 
         return JSONResponse({
             "name": "camoufox-connector",
             "version": __version__,
+            "display_version": get_display_version(),
             "mode": pool.settings.mode.value,
             "pool_size": len(pool.instances),
             "config": {

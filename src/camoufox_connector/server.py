@@ -221,31 +221,37 @@ class Server:
         if self.pool is None:
             return
 
+        from . import get_display_version
+
         endpoints = self.pool.get_all_endpoints()
 
-        print()
-        print("=" * 60)
-        print("  Camoufox Connector - Ready")
-        print("=" * 60)
-        print()
-        print(f"  Mode:           {self.settings.mode.value}")
-        print(f"  Instances:      {len(self.pool.instances)}")
-        print(f"  API endpoint:   http://{self.settings.api_host}:{self.settings.api_port}")
-        print()
-        print("  Browser endpoints:")
+        lines: list[str] = []
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append(f"  Camoufox Connector {get_display_version()}")
+        lines.append("=" * 60)
+        lines.append("")
+        lines.append(f"  Mode:           {self.settings.mode.value}")
+        lines.append(f"  Instances:      {len(self.pool.instances)}")
+        lines.append(f"  API endpoint:   http://{self.settings.api_host}:{self.settings.api_port}")
+        lines.append("")
+        lines.append("  Browser endpoints:")
         for endpoint in endpoints:
-            print(f"    - {endpoint['proxy_endpoint']} ({endpoint['status']})")
-        print()
-        print("  API Routes:")
-        print(f"    GET  /         - Server info")
-        print(f"    GET  /health   - Health check")
-        print(f"    GET  /next     - Get next browser (round-robin)")
-        print(f"    GET  /endpoints - List all endpoints")
-        print(f"    GET  /stats    - Pool statistics")
-        print(f"    POST /restart/{{n}} - Restart instance N")
-        print()
-        print("=" * 60)
-        print()
+            lines.append(f"    - {endpoint['proxy_endpoint']} ({endpoint['status']})")
+        lines.append("")
+        lines.append("  API Routes:")
+        lines.append("    GET  /         - Server info")
+        lines.append("    GET  /health   - Health check")
+        lines.append("    GET  /next     - Get next browser (round-robin)")
+        lines.append("    GET  /endpoints - List all endpoints")
+        lines.append("    GET  /stats    - Pool statistics")
+        lines.append("    POST /restart/{n} - Restart instance N")
+        lines.append("")
+        lines.append("=" * 60)
+        lines.append("")
+
+        text = "\n".join(lines)
+        print(text, flush=True)
 
     async def stop(self) -> None:
         """Stop the server gracefully."""
